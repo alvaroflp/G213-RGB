@@ -1,0 +1,5 @@
+# Logitech G213 Prodigy — acesso ao RGB sem root.
+# Ambas as interfaces HID do teclado compartilham 046d:c336; a regra libera
+# apenas para a sessão do usuário logado (uaccess), sem abrir o dispositivo
+# para todos os usuários do sistema.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c336", TAG+="uaccess", MODE="0660"

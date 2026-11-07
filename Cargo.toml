@@ -1,0 +1,24 @@
+[package]
+name = "g213-rgb"
+version = "0.1.0"
+edition = "2024"
+description = "Controle de iluminação RGB para o teclado Logitech G213 Prodigy"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+egui = "0.36"
+egui-phosphor = "0.14"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
