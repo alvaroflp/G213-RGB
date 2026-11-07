@@ -739,6 +739,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
+ "image",
  "libc",
  "serde",
  "serde_json",

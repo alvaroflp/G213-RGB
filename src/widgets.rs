@@ -7,8 +7,8 @@
 
 use crate::theme::{self, Palette, Weight};
 use egui::{
-    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, InnerResponse, Layout, Margin,
-    Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, CursorIcon, Frame, InnerResponse, Layout, Margin, Rect,
+    Response, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
 pub const CARD: CornerRadius = CornerRadius::same(theme::CARD_RADIUS);
@@ -19,7 +19,6 @@ pub enum ButtonKind {
     Primary,
     Secondary,
     Ghost,
-    Danger,
 }
 
 /// A text/icon button. Sizing is measured from the label so the button never
@@ -32,12 +31,14 @@ pub fn button(
     kind: ButtonKind,
 ) -> Response {
     let font = theme::font(13.5, Weight::Medium);
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), pal.text);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), pal.text);
     let icon_space = if icon.is_some() { 16.0 + 7.0 } else { 0.0 };
     let width = (galley.size().x + icon_space + 24.0).max(theme::CONTROL_H);
     let (rect, response) = ui.allocate_exact_size(vec2(width, theme::CONTROL_H), Sense::click());
 
-    let hovered = response.hovered();
+    let hovered = response.hovered() || response.has_focus();
     let (fill, stroke, fg) = match kind {
         ButtonKind::Primary => (
             if hovered {
@@ -54,19 +55,23 @@ pub fn button(
             pal.text,
         ),
         ButtonKind::Ghost => (
-            if hovered { pal.control } else { Color32::TRANSPARENT },
+            if hovered {
+                pal.control
+            } else {
+                Color32::TRANSPARENT
+            },
             Color32::TRANSPARENT,
             pal.text,
         ),
-        ButtonKind::Danger => (
-            if hovered { pal.danger_tint() } else { Color32::TRANSPARENT },
-            theme::blend(theme::STATUS_DANGER, pal.panel, 0.45),
-            theme::STATUS_DANGER,
-        ),
     };
 
-    ui.painter()
-        .rect(rect, CONTROL, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        CONTROL,
+        fill,
+        Stroke::new(1.0, stroke),
+        StrokeKind::Inside,
+    );
 
     let mut x = rect.left() + 12.0;
     if let Some(icon) = icon {
@@ -74,72 +79,56 @@ pub fn button(
             pos2(x, rect.center().y),
             Align2::LEFT_CENTER,
             icon,
-            FontId::proportional(16.0),
+            theme::icon(16.0),
             fg,
         );
         x = glyph.right() + 7.0;
     }
-    ui.painter()
-        .galley(pos2(x, rect.center().y - galley.size().y * 0.5), galley, fg);
+    ui.painter().galley_with_override_text_color(
+        pos2(x, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
 
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Square icon-only button, used for back, close, refresh and settings.
 pub fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, tooltip: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
-    let hovered = response.hovered();
+    let hovered = response.hovered() || response.has_focus();
     if hovered {
-        ui.painter()
-            .rect_filled(rect, CONTROL, pal.control);
+        ui.painter().rect_filled(rect, CONTROL, pal.control);
     }
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(18.0),
+        theme::icon(18.0),
         if hovered { pal.text } else { pal.text_muted },
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
     response
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(tooltip)
 }
 
-/// An on/off switch, 42×24. The knob animates over ~120 ms.
-pub fn toggle(ui: &mut Ui, pal: &Palette, on: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(42.0, 24.0), Sense::click());
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(response.id, on, 0.12);
-    let track = theme::blend(theme::ACCENT, pal.control, t);
-    let border = theme::blend(theme::ACCENT, pal.border, t);
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        track,
-        Stroke::new(1.0, border),
-        StrokeKind::Inside,
-    );
-    let center_x = egui::lerp((rect.left() + 12.0)..=(rect.right() - 12.0), t);
-    ui.painter()
-        .circle_filled(pos2(center_x, rect.center().y), 9.0, Color32::WHITE);
-    response.on_hover_cursor(CursorIcon::PointingHand)
-}
-
-/// Title + description on the left, switch on the right. Returns the new value
 /// (unchanged when the row was not clicked).
-pub fn toggle_row(
-    ui: &mut Ui,
-    pal: &Palette,
-    title: &str,
-    description: &str,
-    value: bool,
-) -> bool {
+pub fn toggle_row(ui: &mut Ui, pal: &Palette, title: &str, description: &str, value: bool) -> bool {
     let mut next = value;
     let height = 42.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    let toggle_rect = Rect::from_center_size(pos2(rect.right() - 21.0, rect.center().y), vec2(42.0, 24.0));
-    let response = ui.interact(toggle_rect, ui.id().with(("toggle-row", title)), Sense::click());
+    let toggle_rect =
+        Rect::from_center_size(pos2(rect.right() - 21.0, rect.center().y), vec2(42.0, 24.0));
+    let response = ui.interact(rect, ui.id().with(("toggle-row", title)), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, title)
+    });
 
     ui.painter().text(
         pos2(rect.left(), rect.top() + 1.0),
@@ -164,13 +153,7 @@ pub fn toggle_row(
     next
 }
 
-fn toggle_at(
-    ui: &mut Ui,
-    pal: &Palette,
-    rect: Rect,
-    response: Response,
-    on: bool,
-) -> Response {
+fn toggle_at(ui: &mut Ui, pal: &Palette, rect: Rect, response: Response, on: bool) -> Response {
     let t = ui.ctx().animate_bool_with_time(response.id, on, 0.12);
     let track = theme::blend(theme::ACCENT, pal.control, t);
     let border = theme::blend(theme::ACCENT, pal.border, t);
@@ -199,8 +182,13 @@ pub fn swatch(ui: &mut Ui, pal: &Palette, color: crate::config::Rgb, selected: b
         pal.border
     };
     let stroke = if selected { 2.0 } else { 1.0 };
-    ui.painter()
-        .rect(rect, CONTROL, fill, Stroke::new(stroke, border), StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        CONTROL,
+        fill,
+        Stroke::new(stroke, border),
+        StrokeKind::Inside,
+    );
     if response.hovered() {
         ui.painter().circle_stroke(
             rect.center(),
@@ -231,7 +219,7 @@ pub fn custom_swatch(ui: &mut Ui, pal: &Palette) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         egui_phosphor::regular::PALETTE,
-        FontId::proportional(15.0),
+        theme::icon(15.0),
         pal.text_muted,
     );
     response
@@ -291,7 +279,11 @@ pub fn segmented<T: Copy + PartialEq>(
             Align2::CENTER_CENTER,
             *label,
             font.clone(),
-            if is_selected { pal.text } else { pal.text_muted },
+            if is_selected {
+                pal.text
+            } else {
+                pal.text_muted
+            },
         );
         if response.clicked() {
             clicked = Some(*value);
@@ -321,9 +313,13 @@ pub fn slider_row(
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("{value}%"))
-                    .font(theme::font(12.5, Weight::Medium))
-                    .color(pal.text_muted),
+                RichText::new(if *range.end() == 100 {
+                    format!("{value}%")
+                } else {
+                    value.to_string()
+                })
+                .font(theme::font(12.5, Weight::Medium))
+                .color(pal.text_muted),
             );
         });
     });
@@ -341,10 +337,25 @@ pub fn slider(
     value: &mut u8,
     range: std::ops::RangeInclusive<u8>,
 ) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), 26.0),
-        Sense::click_and_drag(),
-    );
+    let (rect, mut response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+    if response.has_focus() {
+        let delta = ui.input(|i| {
+            i.key_pressed(egui::Key::ArrowRight) as i16 - i.key_pressed(egui::Key::ArrowLeft) as i16
+        });
+        let next = (i16::from(*value) + delta)
+            .clamp(i16::from(*range.start()), i16::from(*range.end())) as u8;
+        if next != *value {
+            *value = next;
+            response.mark_changed();
+        }
+        ui.painter().rect_stroke(
+            rect,
+            CONTROL,
+            Stroke::new(1.0, theme::ACCENT),
+            StrokeKind::Inside,
+        );
+    }
     let min = *range.start();
     let max = *range.end();
     let span = f32::from(max.saturating_sub(min));
@@ -393,85 +404,6 @@ pub fn slider(
     response
 }
 
-/// A radio-card for effects. Returns the click response so the caller can
-/// apply the choice.
-pub fn choice_card(
-    ui: &mut Ui,
-    pal: &Palette,
-    size: Vec2,
-    icon: &str,
-    title: &str,
-    description: &str,
-    selected: bool,
-) -> Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let hovered = response.hovered();
-    let fill = if selected {
-        pal.accent_tint()
-    } else if hovered {
-        pal.control_hover
-    } else {
-        pal.input
-    };
-    let border = if selected {
-        theme::ACCENT
-    } else {
-        pal.border
-    };
-    ui.painter().rect(
-        rect,
-        CARD,
-        fill,
-        Stroke::new(if selected { 2.0 } else { 1.0 }, border),
-        StrokeKind::Inside,
-    );
-
-    let icon_color = if selected { theme::ACCENT } else { pal.text_muted };
-    ui.painter().text(
-        pos2(rect.left() + 14.0, rect.top() + 14.0),
-        Align2::LEFT_TOP,
-        icon,
-        FontId::proportional(18.0),
-        icon_color,
-    );
-
-    // Radio dot in the top-right corner.
-    let dot = pos2(rect.right() - 18.0, rect.top() + 18.0);
-    ui.painter().circle_stroke(
-        dot,
-        6.0,
-        Stroke::new(
-            1.5,
-            if selected { theme::ACCENT } else { pal.text_muted },
-        ),
-    );
-    if selected {
-        ui.painter().circle_filled(dot, 3.0, theme::ACCENT);
-    }
-
-    ui.painter().text(
-        pos2(rect.left() + 14.0, rect.top() + 42.0),
-        Align2::LEFT_TOP,
-        title,
-        theme::font(14.5, Weight::SemiBold),
-        pal.text,
-    );
-
-    let galley = ui.painter().layout(
-        description.to_owned(),
-        theme::font(12.0, Weight::Regular),
-        pal.text_muted,
-        rect.width() - 28.0,
-    );
-    ui.painter().galley(
-        pos2(rect.left() + 14.0, rect.top() + 63.0),
-        galley,
-        pal.text_muted,
-    );
-
-    response.on_hover_cursor(CursorIcon::PointingHand)
-}
-
 /// A titled card. Pass `None` for an untitled surface.
 pub fn panel_card<R>(
     ui: &mut Ui,
@@ -490,7 +422,7 @@ pub fn panel_card<R>(
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(icon)
-                            .font(FontId::proportional(16.0))
+                            .font(theme::icon(16.0))
                             .color(pal.text_muted),
                     );
                     ui.label(
@@ -520,11 +452,9 @@ pub fn divider(ui: &mut Ui, pal: &Palette) {
 
 /// Small status pill with a coloured dot.
 pub fn status_pill(ui: &mut Ui, pal: &Palette, label: &str, color: Color32) -> Response {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        theme::font(12.0, Weight::Medium),
-        color,
-    );
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), theme::font(12.0, Weight::Medium), color);
     let width = 22.0 + galley.size().x + 12.0;
     let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
     ui.painter().rect(
@@ -561,7 +491,10 @@ pub fn badge(ui: &mut Ui, pal: &Palette, label: &str) -> Response {
         StrokeKind::Inside,
     );
     ui.painter().galley(
-        pos2(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
+        pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
         galley,
         pal.text_muted,
     );
@@ -605,25 +538,18 @@ pub fn callout(
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(icon)
-                        .font(FontId::proportional(16.0))
-                        .color(color),
-                );
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(icon).font(theme::icon(16.0)).color(color));
                 ui.label(
                     RichText::new(text)
                         .font(theme::font(12.5, Weight::Regular))
                         .color(pal.text),
                 );
-                if let Some(action) = action {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if button(ui, pal, action, None, ButtonKind::Secondary).clicked() {
-                            clicked = true;
-                        }
-                    });
-                }
             });
+            if let Some(action) = action {
+                ui.add_space(4.0);
+                clicked = button(ui, pal, action, None, ButtonKind::Secondary).clicked();
+            }
         });
     clicked
 }
@@ -637,16 +563,4 @@ pub fn hairline(ui: &mut Ui, pal: &Palette, inset: f32) {
         0.0,
         pal.border,
     );
-}
-
-/// Painter-friendly text helper for fixed rows.
-pub fn paint_text(
-    painter: &egui::Painter,
-    pos: Pos2,
-    text: &str,
-    size: f32,
-    weight: Weight,
-    color: Color32,
-) -> Rect {
-    painter.text(pos, Align2::LEFT_TOP, text, theme::font(size, weight), color)
 }

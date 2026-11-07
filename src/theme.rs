@@ -9,7 +9,6 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
 use std::sync::Arc;
 
 pub const ACCENT: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
-pub const ACCENT_PRIMARY: Color32 = Color32::from_rgb(0x1d, 0x4e, 0xd8);
 pub const STATUS_CONNECTED: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 pub const STATUS_CONNECTING: Color32 = Color32::from_rgb(0xea, 0xb3, 0x08);
 pub const STATUS_OFFLINE: Color32 = Color32::from_rgb(0x6b, 0x72, 0x80);
@@ -17,8 +16,6 @@ pub const STATUS_DANGER: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 
 /// Header height, matching OpenLogi's `HEADER_H`.
 pub const HEADER_H: f32 = 64.0;
-/// Left navigation rail width, matching OpenLogi's `DETAIL_RAIL_W`.
-pub const RAIL_W: f32 = 168.0;
 /// Inset around a tab body.
 pub const SCREEN_PAD: f32 = 20.0;
 /// Inner padding of a card.
@@ -28,8 +25,6 @@ pub const CONTROL_RADIUS: u8 = 8;
 pub const CONTROL_H: f32 = 32.0;
 /// Compact settings card width (`ContentWidth::Small`).
 pub const CONTENT_SMALL: f32 = 560.0;
-/// Wider single panel (`ContentWidth::Medium`).
-pub const CONTENT_MEDIUM: f32 = 680.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
@@ -76,38 +71,13 @@ impl Palette {
         }
     }
 
-    pub fn palette(dark: bool) -> Self {
+    pub fn for_mode(dark: bool) -> Self {
         if dark { Self::dark() } else { Self::light() }
     }
 
     /// The accent at OpenLogi's ~12 % tint, used for selected rows and cards.
     pub fn accent_tint(self) -> Color32 {
         blend(ACCENT, self.panel, 0.12)
-    }
-
-    pub fn accent_tint_hover(self) -> Color32 {
-        blend(ACCENT, self.panel, 0.18)
-    }
-
-    /// Text placed on top of an accent-filled control.
-    pub fn on_accent(self) -> Color32 {
-        Color32::WHITE
-    }
-
-    pub fn danger_tint(self) -> Color32 {
-        blend(STATUS_DANGER, self.panel, 0.12)
-    }
-
-    pub fn success_tint(self) -> Color32 {
-        blend(STATUS_CONNECTED, self.panel, 0.12)
-    }
-
-    pub fn warning_tint(self) -> Color32 {
-        blend(STATUS_CONNECTING, self.panel, 0.14)
-    }
-
-    pub fn is_dark(self) -> bool {
-        self.dark
     }
 }
 
@@ -144,6 +114,10 @@ pub fn font(size: f32, weight: Weight) -> FontId {
     FontId::new(size, family(weight))
 }
 
+pub fn icon(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("icons".into()))
+}
+
 /// Bundle Inter and Phosphor. Inter is licensed under the SIL Open Font
 /// License; Phosphor icons under MIT. Both live in `assets/`.
 pub fn install_fonts(ctx: &egui::Context) {
@@ -169,6 +143,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     );
 
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    fonts
+        .families
+        .insert(FontFamily::Name("icons".into()), vec!["phosphor".into()]);
 
     fonts
         .families
@@ -248,10 +225,7 @@ fn apply_theme_style(ctx: &egui::Context, theme: egui::Theme, pal: Palette) {
     style.spacing.slider_width = 220.0;
     style.spacing.interact_size.y = CONTROL_H;
     style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            font(20.0, Weight::SemiBold),
-        ),
+        (egui::TextStyle::Heading, font(20.0, Weight::SemiBold)),
         (egui::TextStyle::Body, font(15.0, Weight::Regular)),
         (egui::TextStyle::Button, font(14.0, Weight::Medium)),
         (egui::TextStyle::Small, font(12.0, Weight::Regular)),

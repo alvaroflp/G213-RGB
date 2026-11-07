@@ -1,27 +1,24 @@
 //! The application shell and screens.
 //!
-//! The layout mirrors the OpenLogi desktop app: a gallery screen that lists
-//! devices, and a device page with a compact identity header, a stable section
-//! rail and a single centred content column. All controls are painted by
-//! [`crate::widgets`] so the visual language matches that source.
+//! OpenLogi-inspired gallery, top-level device tabs and local lighting profiles.
+//! Product photography identifies the keyboard; a separate diagram previews RGB.
 
 use crate::config::{
-    self, Config, Effect, Layout, Rgb, ThemeMode, WaveDirection, ZONE_COUNT, ZONE_NAMES,
+    self, Config, Effect, Layout, Lighting, Rgb, ThemeMode, WaveDirection, ZONE_COUNT, ZONE_NAMES,
 };
 use crate::device::{ApplyState, ConnectionState, DeviceStatus, DeviceWorker};
 use crate::keyboard::{self, KeyboardState};
 use crate::theme::{self, Palette, Weight};
 use crate::widgets::{self, ButtonKind};
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout as ELayout, Margin, Pos2, Rect,
-    Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, pos2,
-    vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout as ELayout, Margin, Rect,
+    RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, pos2, vec2,
 };
 use std::time::{Duration, Instant};
 
+mod profiles;
+
 const DEVICE_NAME: &str = "Logitech G213 Prodigy";
-const CARD_W: f32 = 300.0;
-const CARD_H: f32 = 312.0;
 
 /// The nine preset colours, shared by the lighting and effect tabs.
 const SWATCHES: [Rgb; 9] = [
@@ -46,25 +43,19 @@ enum View {
 enum Tab {
     Lighting,
     Effects,
+    Profiles,
     Device,
 }
 
 impl Tab {
-    const ALL: [Self; 3] = [Self::Lighting, Self::Effects, Self::Device];
+    const ALL: [Self; 4] = [Self::Lighting, Self::Effects, Self::Profiles, Self::Device];
 
     fn label(self) -> &'static str {
         match self {
             Self::Lighting => "Iluminação",
             Self::Effects => "Efeitos",
+            Self::Profiles => "Perfis",
             Self::Device => "Dispositivo",
-        }
-    }
-
-    fn icon(self) -> &'static str {
-        match self {
-            Self::Lighting => egui_phosphor::regular::LIGHTBULB,
-            Self::Effects => egui_phosphor::regular::SPARKLE,
-            Self::Device => egui_phosphor::regular::KEYBOARD,
         }
     }
 }
@@ -95,7 +86,8 @@ enum SwatchPick {
 
 pub struct G213App {
     config: Config,
-    worker: DeviceWorker,
+    worker: Option<DeviceWorker>,
+    preview: bool,
     status: DeviceStatus,
     last_status_check: Instant,
     preferred: Option<ThemeMode>,
@@ -108,24 +100,61 @@ pub struct G213App {
     settings_open: bool,
     color_editor: Option<ColorEditor>,
     toast: Option<Toast>,
+    product: crate::product::ProductImage,
+    last_lighting: Lighting,
+    undo: Option<Lighting>,
+    profile_name: String,
+    profile_error: Option<String>,
+    deleted_profile: Option<config::Profile>,
 }
 
 impl G213App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
-        theme::apply_style(&cc.egui_ctx);
+    pub fn new(cc: &eframe::CreationContext<'_>, preview: bool) -> Self {
+        Self::with_context(&cc.egui_ctx, preview)
+    }
 
-        let config = Config::load();
-        theme::set_preference(&cc.egui_ctx, config.theme);
+    fn with_context(ctx: &egui::Context, preview: bool) -> Self {
+        theme::install_fonts(ctx);
+        theme::apply_style(ctx);
 
-        let worker = DeviceWorker::start();
-        worker.apply(ApplyState::from(&config));
+        let config = if preview {
+            Config {
+                theme: ThemeMode::Light,
+                ..Config::default()
+            }
+        } else {
+            Config::load()
+        };
+        theme::set_preference(ctx, config.theme);
+
+        let worker = (!preview).then(DeviceWorker::start);
+        if let Some(worker) = &worker {
+            worker.apply(ApplyState::from(&config));
+        }
         let preferred = Some(config.theme);
 
+        let product = crate::product::ProductImage::load(ctx);
+        let last_lighting = config.lighting.clone();
         Self {
+            preview,
+            product,
+            last_lighting,
+            undo: None,
+            profile_name: String::new(),
+            profile_error: None,
+            deleted_profile: None,
             config,
             worker,
-            status: DeviceStatus::searching(),
+            status: if preview {
+                DeviceStatus {
+                    state: ConnectionState::NotFound,
+                    path: None,
+                    name: None,
+                    detail: None,
+                }
+            } else {
+                DeviceStatus::searching()
+            },
             last_status_check: Instant::now(),
             preferred,
             view: View::Home,
@@ -146,16 +175,24 @@ impl G213App {
         self.config.sanitize();
         self.dirty = true;
         self.last_edit = Some(Instant::now());
-        self.worker.apply(ApplyState::from(&self.config));
+        if self.last_lighting != self.config.lighting {
+            self.undo = Some(std::mem::replace(
+                &mut self.last_lighting,
+                self.config.lighting.clone(),
+            ));
+            if let Some(worker) = &self.worker {
+                worker.apply(ApplyState::from(&self.config));
+            }
+        }
     }
 
     fn save_if_due(&mut self) {
-        if !self.dirty {
+        if !self.dirty || self.preview {
             return;
         }
         let due = self
             .last_edit
-            .map_or(true, |edit| edit.elapsed() >= Duration::from_millis(400));
+            .is_none_or(|edit| edit.elapsed() >= Duration::from_millis(400));
         if !due {
             return;
         }
@@ -198,53 +235,35 @@ impl G213App {
         }
     }
 
-    fn zone_colors(&self) -> [Color32; ZONE_COUNT] {
-        let mut colors = [theme::color32(Rgb::BLACK); ZONE_COUNT];
-        if !self.config.enabled {
-            return colors;
-        }
-        match self.config.effect {
-            Effect::Static => match self.config.layout {
-                Layout::Uniform => {
-                    let color = theme::color32(self.config.color);
-                    colors = [color; ZONE_COUNT];
-                }
-                Layout::Zones => {
-                    for (slot, value) in colors.iter_mut().zip(self.config.zones) {
-                        *slot = theme::color32(value);
-                    }
-                }
-            },
-            Effect::Off => {}
-            _ => {
-                let color = theme::color32(self.config.effect_color);
-                colors = [color; ZONE_COUNT];
-            }
-        }
-        colors
-    }
-
-    fn keyboard_state(&self, selected: Option<usize>) -> KeyboardState {
+    fn keyboard_state(&self, selected: Option<usize>, seconds: f64) -> KeyboardState {
         KeyboardState {
-            zone_colors: self.zone_colors(),
-            enabled: self.config.enabled && self.config.effect != Effect::Off,
+            zone_colors: self
+                .config
+                .lighting
+                .preview_colors(seconds)
+                .map(theme::color32),
+            enabled: self.config.lighting.enabled && self.config.lighting.effect != Effect::Off,
             selected_zone: selected,
         }
     }
 
     fn target_color(&self, target: ColorTarget) -> Rgb {
         match target {
-            ColorTarget::Uniform => self.config.color,
-            ColorTarget::Effect => self.config.effect_color,
-            ColorTarget::Zone(zone) => self.config.zone_color(zone),
+            ColorTarget::Uniform => self.config.lighting.color,
+            ColorTarget::Effect => self.config.lighting.effect_color,
+            ColorTarget::Zone(zone) => self.config.lighting.zone_color(zone),
         }
     }
 
     fn set_target_color(&mut self, target: ColorTarget, color: Rgb) {
         match target {
-            ColorTarget::Uniform => self.config.color = color,
-            ColorTarget::Effect => self.config.effect_color = color,
-            ColorTarget::Zone(zone) => self.config.set_zone_color(zone, color),
+            ColorTarget::Uniform => self.config.lighting.color = color,
+            ColorTarget::Effect => self.config.lighting.effect_color = color,
+            ColorTarget::Zone(zone) => self.config.lighting.set_zone_color(zone, color),
+        }
+        if target != ColorTarget::Effect {
+            self.config.lighting.effect = Effect::Static;
+            self.config.lighting.enabled = true;
         }
         self.touch();
     }
@@ -267,314 +286,216 @@ impl G213App {
         let header = Rect::from_min_size(full.min, vec2(full.width(), theme::HEADER_H));
         let mut hud = ui.new_child(
             UiBuilder::new()
-                .max_rect(Rect::from_min_size(
-                    header.min + vec2(20.0, 0.0),
-                    vec2((header.width() - 40.0).max(0.0), header.height()),
-                ))
+                .max_rect(header.shrink2(vec2(24.0, 0.0)))
                 .layout(ELayout::left_to_right(Align::Center)),
         );
-
-        match self.view {
-            View::Home => {
-                hud.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(
-                        RichText::new("Dispositivos")
-                            .font(theme::font(20.0, Weight::SemiBold))
-                            .color(pal.text),
-                    );
-                    let count = if self.status.state == ConnectionState::NotFound {
-                        "Nenhum dispositivo"
-                    } else {
-                        "1 dispositivo"
-                    };
-                    ui.label(
-                        RichText::new(count)
-                            .font(theme::font(12.0, Weight::Regular))
-                            .color(pal.text_muted),
-                    );
-                });
-                hud.with_layout(ELayout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, &pal, egui_phosphor::regular::GEAR, "Ajustes")
-                        .clicked()
-                    {
-                        self.settings_open = true;
-                    }
-                    if widgets::button(
-                        ui,
-                        &pal,
-                        "Atualizar",
-                        Some(egui_phosphor::regular::ARROW_CLOCKWISE),
-                        ButtonKind::Secondary,
-                    )
-                    .clicked()
-                    {
-                        self.worker.refresh();
-                        self.status = self.worker.status();
-                        self.notify("Procurando o teclado…");
-                    }
-                });
+        if self.view == View::Home {
+            hud.label(
+                RichText::new(egui_phosphor::regular::KEYBOARD)
+                    .font(theme::icon(25.0))
+                    .color(theme::ACCENT),
+            );
+            hud.add_space(4.0);
+            hud.label(RichText::new("G213 RGB").font(theme::font(19.0, Weight::SemiBold)));
+        } else {
+            if widgets::icon_button(
+                &mut hud,
+                &pal,
+                egui_phosphor::regular::ARROW_LEFT,
+                "Dispositivos (Esc)",
+            )
+            .clicked()
+            {
+                self.view = View::Home;
             }
-            View::Detail => {
+            hud.label(RichText::new("G213 Prodigy").font(theme::font(18.0, Weight::SemiBold)));
+            hud.add_space(if full.width() > 1050.0 { 40.0 } else { 12.0 });
+            for tab in Tab::ALL {
+                let kind = if self.tab == tab {
+                    ButtonKind::Secondary
+                } else {
+                    ButtonKind::Ghost
+                };
+                if widgets::button(&mut hud, &pal, tab.label(), None, kind).clicked() {
+                    self.tab = tab;
+                }
+            }
+        }
+        hud.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+            if widgets::icon_button(
+                ui,
+                &pal,
+                egui_phosphor::regular::GEAR,
+                "Ajustes de aparência",
+            )
+            .clicked()
+            {
+                self.settings_open = true;
+            }
+            if self.view == View::Home {
                 if widgets::icon_button(
                     ui,
                     &pal,
-                    egui_phosphor::regular::ARROW_LEFT,
-                    "Voltar para dispositivos",
+                    egui_phosphor::regular::ARROW_CLOCKWISE,
+                    "Buscar dispositivos",
                 )
                 .clicked()
                 {
-                    self.view = View::Home;
+                    self.refresh();
                 }
-                hud.add_space(4.0);
-                hud.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(
-                        RichText::new(DEVICE_NAME)
-                            .font(theme::font(18.0, Weight::SemiBold))
-                            .color(pal.text),
-                    );
-                    ui.label(
-                        RichText::new("Teclado · 5 zonas RGB")
-                            .font(theme::font(12.0, Weight::Regular))
-                            .color(pal.text_muted),
-                    );
-                });
-                hud.with_layout(ELayout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, &pal, egui_phosphor::regular::GEAR, "Ajustes")
-                        .clicked()
-                    {
-                        self.settings_open = true;
-                    }
-                    widgets::status_pill(ui, &pal, self.status_label(), self.status_color());
-                });
+            } else {
+                widgets::status_pill(ui, &pal, self.status_label(), self.status_color());
             }
-        }
-
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                pos2(full.left(), header.bottom() - 1.0),
-                vec2(full.width(), 1.0),
-            ),
-            0.0,
-            pal.border,
+        });
+        ui.painter().hline(
+            header.x_range(),
+            header.bottom() - 1.0,
+            Stroke::new(1.0, pal.border),
         );
     }
 
-    fn rail_ui(&mut self, ui: &mut Ui, pal: Palette) {
-        let full = ui.max_rect();
-        ui.painter().rect_filled(full, 0.0, pal.panel);
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                pos2(full.right() - 1.0, full.top()),
-                vec2(1.0, full.height()),
-            ),
-            0.0,
-            pal.border,
-        );
-
-        let mut rail = ui.new_child(
-            UiBuilder::new()
-                .max_rect(Rect::from_min_size(
-                    full.min + vec2(12.0, 16.0),
-                    vec2((full.width() - 24.0).max(0.0), full.height() - 32.0),
-                ))
-                .layout(ELayout::top_down(Align::Min)),
-        );
-        rail.spacing_mut().item_spacing.y = 4.0;
-
-        for tab in Tab::ALL {
-            let selected = tab == self.tab;
-            let (rect, response) =
-                rail.allocate_exact_size(vec2(rail.available_width(), 36.0), Sense::click());
-            if selected {
-                rail.painter()
-                    .rect(rect, widgets::CONTROL, pal.accent_tint(), Stroke::NONE, StrokeKind::Inside);
-                rail.painter().rect_filled(
-                    Rect::from_min_size(pos2(rect.left(), rect.center().y - 8.0), vec2(3.0, 16.0)),
-                    CornerRadius::same(2),
-                    theme::ACCENT,
-                );
-            } else if response.hovered() {
-                rail.painter()
-                    .rect_filled(rect, widgets::CONTROL, pal.control);
-            }
-            rail.painter().text(
-                pos2(rect.left() + 12.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                tab.icon(),
-                FontId::proportional(16.0),
-                if selected { theme::ACCENT } else { pal.text_muted },
-            );
-            rail.painter().text(
-                pos2(rect.left() + 36.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                tab.label(),
-                theme::font(13.5, Weight::Medium),
-                if selected { pal.text } else { pal.text_muted },
-            );
-            if response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.tab = tab;
-            }
+    fn refresh(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.refresh();
+            self.status = DeviceStatus::searching();
+        } else {
+            self.notify("Prévia: nenhum dispositivo será acessado");
+            return;
         }
+        self.notify("Procurando o G213…");
     }
-
-    // -----------------------------------------------------------------------------------------
-    // Home
-    // -----------------------------------------------------------------------------------------
 
     fn home_ui(&mut self, ui: &mut Ui, pal: Palette) {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(24.0);
-                let avail = ui.available_width();
-                let content_w = (avail - 48.0).clamp(320.0, 760.0);
-                let pad = ((avail - content_w) * 0.5).max(0.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(pad);
-                    ui.vertical(|ui| {
-                        ui.set_width(content_w);
-                        if self.connection_callout(ui, &pal) {
-                            // The callout handled its own action.
-                        }
-                        ui.add_space(8.0);
-                        let response = self.device_card(ui, &pal);
-                        if response.clicked() {
-                            self.view = View::Detail;
-                        }
+                ui.add_space(22.0);
+                centered(ui, 820.0, |ui| {
+                    ui.label(
+                        RichText::new("Seus dispositivos")
+                            .font(theme::font(28.0, Weight::SemiBold)),
+                    );
+                    ui.label(
+                        RichText::new("Seu teclado. Suas cores. Tudo neste computador.")
+                            .size(14.0)
+                            .color(pal.text_muted),
+                    );
+                    ui.add_space(12.0);
+                    self.connection_callout(ui, &pal);
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(((ui.available_width() - 430.0) * 0.5).max(0.0));
+                        ui.vertical(|ui| {
+                            ui.set_width(430.0);
+                            let card = widgets::panel_card(ui, &pal, None, |ui| {
+                                ui.horizontal(|ui| {
+                                    widgets::badge(ui, &pal, "TECLADO");
+                                    ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                                        widgets::status_pill(
+                                            ui,
+                                            &pal,
+                                            self.status_label(),
+                                            self.status_color(),
+                                        );
+                                    });
+                                });
+                                ui.add_space(16.0);
+                                self.product.show(ui, ui.available_width());
+                                ui.add_space(12.0);
+                                ui.label(
+                                    RichText::new("G213 Prodigy")
+                                        .font(theme::font(24.0, Weight::SemiBold)),
+                                );
+                                ui.label(
+                                    RichText::new("Logitech · USB · 5 zonas RGB")
+                                        .size(13.0)
+                                        .color(pal.text_muted),
+                                );
+                                ui.add_space(14.0);
+                                widgets::divider(ui, &pal);
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    let summary = if self.config.lighting.enabled {
+                                        self.config.lighting.effect.label()
+                                    } else {
+                                        "Desligado"
+                                    };
+                                    ui.label(
+                                        RichText::new(format!("Iluminação · {summary}"))
+                                            .size(12.0)
+                                            .color(pal.text_muted),
+                                    );
+                                    ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                                        if widgets::button(
+                                            ui,
+                                            &pal,
+                                            "Personalizar",
+                                            Some(egui_phosphor::regular::ARROW_RIGHT),
+                                            ButtonKind::Primary,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.view = View::Detail;
+                                        }
+                                    });
+                                });
+                            });
+                            if ui
+                                .interact(
+                                    card.response.rect,
+                                    ui.id().with("device-card"),
+                                    Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                self.view = View::Detail;
+                            }
+                        });
+                    });
+                    ui.add_space(16.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Compatível com Logitech G213 Prodigy")
+                                .size(12.0)
+                                .color(pal.text_muted),
+                        );
+                        ui.label(
+                            RichText::new("Configuração local · Sem conta · Sem telemetria")
+                                .size(11.0)
+                                .color(pal.text_muted),
+                        );
                     });
                 });
-                ui.add_space(24.0);
+                ui.add_space(16.0);
             });
-    }
-
-    fn device_card(&mut self, ui: &mut Ui, pal: &Palette) -> Response {
-        let (rect, response) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::click());
-        let hovered = response.hovered();
-        let accent = theme::color32(self.config.preview_color());
-
-        // The glow is the card's only decoration; it uses the current colour so
-        // the gallery previews the lighting state at a glance.
-        if self.config.enabled {
-            for (index, spread) in [22.0f32, 16.0, 11.0, 7.0].into_iter().enumerate() {
-                let alpha = [8u8, 12, 16, 22][index];
-                ui.painter().rect_filled(
-                    rect.shrink(10.0).expand(spread),
-                    CornerRadius::same((22.0 + spread) as u8),
-                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha),
-                );
-            }
-        }
-
-        ui.painter().rect(
-            rect,
-            widgets::CARD,
-            pal.panel,
-            Stroke::new(
-                1.0,
-                if hovered { theme::ACCENT } else { pal.border },
-            ),
-            StrokeKind::Inside,
-        );
-
-        let preview = Rect::from_min_size(
-            rect.min + vec2(18.0, 18.0),
-            vec2(rect.width() - 36.0, 150.0),
-        );
-        let mut artwork = ui.new_child(
-            UiBuilder::new()
-                .max_rect(preview)
-                .layout(ELayout::top_down(Align::Center)),
-        );
-        artwork.add_space(34.0);
-        let mut state = self.keyboard_state(None);
-        state.selected_zone = None;
-        keyboard::keyboard(&mut artwork, pal, preview.width().min(242.0), &state, false);
-
-        // Status pill, top-right over the artwork.
-        let color = self.status_color();
-        let label = self.status_label();
-        let width = pill_width(ui, label);
-        paint_pill(
-            ui,
-            pal,
-            pos2(rect.right() - 16.0 - width, rect.top() + 14.0),
-            label,
-            color,
-        );
-
-        paint_text(
-            ui,
-            pos2(rect.left() + 18.0, preview.bottom() + 8.0),
-            DEVICE_NAME,
-            16.0,
-            Weight::SemiBold,
-            pal.text,
-        );
-        paint_text(
-            ui,
-            pos2(rect.left() + 18.0, preview.bottom() + 32.0),
-            "Teclado",
-            12.5,
-            Weight::Regular,
-            pal.text_muted,
-        );
-
-        let mut badge_x = rect.left() + 18.0;
-        badge_x += paint_badge(ui, pal, pos2(badge_x, preview.bottom() + 58.0), "5 zonas RGB")
-            + 6.0;
-        paint_badge(ui, pal, pos2(badge_x, preview.bottom() + 58.0), "USB");
-
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                pos2(rect.left() + 18.0, rect.bottom() - 52.0),
-                vec2(rect.width() - 36.0, 1.0),
-            ),
-            0.0,
-            pal.border,
-        );
-        paint_text(
-            ui,
-            pos2(rect.left() + 18.0, rect.bottom() - 34.0),
-            if self.config.enabled && self.config.effect != Effect::Off {
-                "Iluminação ativa"
-            } else {
-                "Iluminação desligada"
-            },
-            12.0,
-            Weight::Regular,
-            pal.text_muted,
-        );
-        let arrow = egui_phosphor::regular::ARROW_RIGHT;
-        ui.painter().text(
-            pos2(rect.right() - 18.0, rect.bottom() - 34.0),
-            Align2::RIGHT_TOP,
-            arrow,
-            FontId::proportional(14.0),
-            if hovered { theme::ACCENT } else { pal.text_muted },
-        );
-
-        response.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     /// Renders a status notice. Returns true when the user clicked its action.
     fn connection_callout(&mut self, ui: &mut Ui, pal: &Palette) -> bool {
+        if self.preview {
+            widgets::callout(
+                ui,
+                pal,
+                theme::ACCENT,
+                egui_phosphor::regular::EYE,
+                "Modo de prévia. Experimente sem alterar o teclado ou suas configurações.",
+                None,
+            );
+            return false;
+        }
         let (color, icon, text, action) = match self.status.state {
             ConnectionState::Connected => return false,
             ConnectionState::PermissionDenied => (
                 theme::STATUS_DANGER,
                 egui_phosphor::regular::WARNING_CIRCLE,
-                "Sem permissão para acessar o teclado. Execute ./install.sh para liberar o acesso.",
+                "Libere o acesso ao G213 com o instalador e reconecte o cabo USB.",
                 Some("Copiar comando"),
             ),
             ConnectionState::NotFound => (
                 theme::STATUS_OFFLINE,
                 egui_phosphor::regular::PLUG,
-                "Teclado não encontrado. Verifique o cabo USB e clique em atualizar.",
+                "Conecte seu G213 por USB. Você pode preparar a iluminação enquanto isso.",
                 Some("Atualizar"),
             ),
             ConnectionState::Searching => (
@@ -586,7 +507,7 @@ impl G213App {
             ConnectionState::Error => (
                 theme::STATUS_DANGER,
                 egui_phosphor::regular::WARNING,
-                "Falha ao conversar com o teclado.",
+                "Não foi possível acessar o G213. Verifique a conexão USB.",
                 Some("Atualizar"),
             ),
         };
@@ -598,9 +519,7 @@ impl G213App {
                     self.notify("Comando copiado para a área de transferência");
                 }
                 _ => {
-                    self.worker.refresh();
-                    self.status = self.worker.status();
-                    self.notify("Procurando o teclado…");
+                    self.refresh();
                 }
             }
             ui.add_space(8.0);
@@ -613,436 +532,441 @@ impl G213App {
     // -----------------------------------------------------------------------------------------
 
     fn detail_ui(&mut self, ui: &mut Ui, pal: Palette) {
-        let full = ui.max_rect();
-        let rail_rect = Rect::from_min_size(full.min, vec2(theme::RAIL_W, full.height()));
-        let content_rect = Rect::from_min_max(
-            pos2(full.min.x + theme::RAIL_W, full.min.y),
-            full.max,
-        );
+        ScrollArea::vertical()
+            .id_salt(("detail", self.tab as u8))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(24.0);
+                centered(ui, 1120.0, |ui| {
+                    if self.status.state != ConnectionState::Connected {
+                        self.connection_callout(ui, &pal);
+                        ui.add_space(16.0);
+                    }
+                    if self.tab == Tab::Device {
+                        self.device_tab(ui, pal);
+                        return;
+                    }
+                    if self.tab == Tab::Profiles {
+                        self.profiles_tab(ui, pal);
+                        return;
+                    }
+                    let width = ui.available_width();
+                    if width >= 820.0 {
+                        let right = if width >= 1000.0 { 416.0 } else { 360.0 };
+                        ui.horizontal_top(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(width - right - 28.0);
+                                self.product_panel(ui, pal);
+                            });
+                            ui.add_space(20.0);
+                            ui.vertical(|ui| {
+                                ui.set_width(right);
+                                if self.tab == Tab::Lighting {
+                                    self.lighting_tab(ui, pal);
+                                } else {
+                                    self.effects_tab(ui, pal);
+                                }
+                            });
+                        });
+                    } else {
+                        self.product_panel(ui, pal);
+                        ui.add_space(20.0);
+                        if self.tab == Tab::Lighting {
+                            self.lighting_tab(ui, pal);
+                        } else {
+                            self.effects_tab(ui, pal);
+                        }
+                    }
+                });
+                ui.add_space(24.0);
+            });
+    }
 
-        let mut rail = ui.new_child(UiBuilder::new().max_rect(rail_rect));
-        self.rail_ui(&mut rail, pal);
-
-        let mut content = ui.new_child(
-            UiBuilder::new()
-                .max_rect(content_rect)
-                .layout(ELayout::top_down(Align::Min)),
+    fn product_panel(&mut self, ui: &mut Ui, pal: Palette) {
+        ui.label(
+            RichText::new("FEITO PARA O SEU G213")
+                .font(theme::font(11.0, Weight::Medium))
+                .color(pal.text_muted),
         );
-        match self.tab {
-            Tab::Lighting => self.lighting_tab(&mut content, pal),
-            Tab::Effects => self.effects_tab(&mut content, pal),
-            Tab::Device => self.device_tab(&mut content, pal),
-        }
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(if self.tab == Tab::Lighting {
+                "Dê cor ao seu espaço."
+            } else {
+                "Luz em movimento."
+            })
+            .font(theme::font(26.0, Weight::SemiBold)),
+        );
+        ui.add_space(22.0);
+        let width = ui.available_width().min(440.0);
+        ui.vertical_centered(|ui| {
+            self.product.show(ui, width);
+        });
+        ui.add_space(18.0);
+        widgets::panel_card(ui, &pal, None, |ui| {
+            ui.horizontal(|ui| {
+                widgets::section_label(ui, &pal, "Prévia da iluminação");
+                ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                    widgets::badge(ui, &pal, "SIMULAÇÃO");
+                });
+            });
+            ui.add_space(12.0);
+            let interactive =
+                self.tab == Tab::Lighting && self.config.lighting.layout == Layout::Zones;
+            let state = self.keyboard_state(
+                if interactive {
+                    Some(self.selected_zone)
+                } else {
+                    None
+                },
+                ui.input(|i| i.time),
+            );
+            let clicked = ui
+                .vertical_centered(|ui| {
+                    keyboard::keyboard(
+                        ui,
+                        &pal,
+                        ui.available_width().min(380.0),
+                        &state,
+                        interactive,
+                    )
+                    .1
+                })
+                .inner;
+            if let Some(zone) = clicked {
+                self.selected_zone = zone;
+            }
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(if interactive {
+                    "Clique em uma das cinco áreas para escolher a cor."
+                } else {
+                    "A prévia é aproximada; a foto acima identifica o produto."
+                })
+                .size(11.5)
+                .color(pal.text_muted),
+            );
+        });
     }
 
     fn lighting_tab(&mut self, ui: &mut Ui, pal: Palette) {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(theme::SCREEN_PAD);
-                centered(ui, theme::CONTENT_SMALL, |ui| {
-                    let mut changed = false;
-
-                    widgets::panel_card(
-                        ui,
-                        &pal,
-                        Some((egui_phosphor::regular::LIGHTBULB, "Iluminação")),
-                        |ui| {
-                            let interactive =
-                                self.config.layout == Layout::Zones && self.config.enabled;
-                            let selected = if interactive {
-                                Some(self.selected_zone)
-                            } else {
-                                None
-                            };
-                            let state = self.keyboard_state(selected);
-                            let width = ui.available_width();
-                            let (_, clicked) =
-                                keyboard::keyboard(ui, &pal, width, &state, interactive);
-                            if let Some(zone) = clicked {
-                                self.selected_zone = zone;
-                            }
-                            ui.add_space(10.0);
-                            let enabled = widgets::toggle_row(
-                                ui,
-                                &pal,
-                                "Iluminação ativa",
-                                "Liga ou desliga todo o RGB do teclado",
-                                self.config.enabled,
-                            );
-                            if enabled != self.config.enabled {
-                                self.config.enabled = enabled;
-                                if enabled && self.config.effect == Effect::Off {
-                                    // Turning the master switch back on should
-                                    // produce light even if the last effect was Off.
-                                    self.config.effect = Effect::Static;
-                                }
-                                changed = true;
-                            }
-                            ui.add_space(8.0);
-                            if let Some(layout) = widgets::segmented(
-                                ui,
-                                &pal,
-                                "layout",
-                                &[
-                                    (Layout::Uniform, "Uniforme"),
-                                    (Layout::Zones, "Por zona"),
-                                ],
-                                self.config.layout,
-                            ) && layout != self.config.layout
-                            {
-                                self.config.layout = layout;
-                                changed = true;
-                            }
-                        },
-                    );
-
-                    ui.add_space(12.0);
-
-                    widgets::panel_card(
-                        ui,
-                        &pal,
-                        Some((egui_phosphor::regular::PALETTE, "Cor")),
-                        |ui| {
-                            match self.config.layout {
-                                Layout::Uniform => {
-                                    widgets::section_label(ui, &pal, "Cor do teclado");
-                                    ui.add_space(8.0);
-                                    match swatch_row(ui, &pal, self.config.color) {
-                                        SwatchPick::Color(color) => {
-                                            self.config.color = color;
-                                            changed = true;
-                                        }
-                                        SwatchPick::Custom => {
-                                            self.open_color_editor(ColorTarget::Uniform);
-                                        }
-                                        SwatchPick::None => {}
-                                    }
-                                    ui.add_space(10.0);
-                                    ui.label(
-                                        RichText::new(self.config.color.hex())
-                                            .font(theme::font(12.0, Weight::Medium))
-                                            .color(pal.text_muted),
-                                    );
-                                }
-                                Layout::Zones => {
-                                    widgets::section_label(
-                                        ui,
-                                        &pal,
-                                        "Zonas de iluminação",
-                                    );
-                                    ui.add_space(8.0);
-                                    for (index, name) in ZONE_NAMES.iter().enumerate() {
-                                        let selected = index == self.selected_zone;
-                                        let color = theme::color32(self.config.zone_color(index));
-                                        let (rect, response) = ui.allocate_exact_size(
-                                            vec2(ui.available_width(), 38.0),
-                                            Sense::click(),
-                                        );
-                                        if selected {
-                                            ui.painter().rect(
-                                                rect,
-                                                widgets::CONTROL,
-                                                pal.accent_tint(),
-                                                Stroke::NONE,
-                                                StrokeKind::Inside,
-                                            );
-                                        } else if response.hovered() {
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                widgets::CONTROL,
-                                                pal.control,
-                                            );
-                                        }
-                                        ui.painter().circle_filled(
-                                            pos2(rect.left() + 14.0, rect.center().y),
-                                            6.0,
-                                            color,
-                                        );
-                                        ui.painter().circle_stroke(
-                                            pos2(rect.left() + 14.0, rect.center().y),
-                                            6.0,
-                                            Stroke::new(1.0, pal.border),
-                                        );
-                                        ui.painter().text(
-                                            pos2(rect.left() + 30.0, rect.center().y),
-                                            Align2::LEFT_CENTER,
-                                            *name,
-                                            theme::font(13.0, Weight::Medium),
-                                            pal.text,
-                                        );
-                                        ui.painter().text(
-                                            pos2(rect.right() - 12.0, rect.center().y),
-                                            Align2::RIGHT_CENTER,
-                                            self.config.zone_color(index).hex(),
-                                            theme::font(12.0, Weight::Regular),
-                                            pal.text_muted,
-                                        );
-                                        if response
-                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                            .clicked()
-                                        {
-                                            self.selected_zone = index;
-                                        }
-                                    }
-                                    ui.add_space(10.0);
-                                    widgets::divider(ui, &pal);
-                                    ui.add_space(10.0);
-                                    widgets::section_label(
-                                        ui,
-                                        &pal,
-                                        &format!("Cor de {}", ZONE_NAMES[self.selected_zone]),
-                                    );
-                                    ui.add_space(8.0);
-                                    let current = self.config.zone_color(self.selected_zone);
-                                    match swatch_row(ui, &pal, current) {
-                                        SwatchPick::Color(color) => {
-                                            self.config
-                                                .set_zone_color(self.selected_zone, color);
-                                            changed = true;
-                                        }
-                                        SwatchPick::Custom => {
-                                            self.open_color_editor(ColorTarget::Zone(
-                                                self.selected_zone,
-                                            ));
-                                        }
-                                        SwatchPick::None => {}
-                                    }
-                                    ui.add_space(10.0);
-                                    ui.label(
-                                        RichText::new(current.hex())
-                                            .font(theme::font(12.0, Weight::Medium))
-                                            .color(pal.text_muted),
-                                    );
-                                }
-                            }
-                        },
-                    );
-
-                    ui.add_space(12.0);
-
-                    widgets::panel_card(
-                        ui,
-                        &pal,
-                        Some((egui_phosphor::regular::SUN, "Brilho")),
-                        |ui| {
-                            let mut brightness = self.config.brightness;
-                            if widgets::slider_row(
-                                ui,
-                                &pal,
-                                "Brilho",
-                                &mut brightness,
-                                1..=100,
-                            ) {
-                                self.config.brightness = brightness;
-                                changed = true;
-                            }
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new(
-                                    "O brilho é aplicado por software, escalando as cores enviadas.",
-                                )
-                                .font(theme::font(11.5, Weight::Regular))
-                                .color(pal.text_muted),
-                            );
-                        },
-                    );
-
-                    if changed {
-                        self.touch();
+        widgets::panel_card(ui, &pal, None, |ui| {
+            let on = self.config.lighting.enabled && self.config.lighting.effect != Effect::Off;
+            let enabled =
+                widgets::toggle_row(ui, &pal, "Iluminação", "Acenda o teclado do seu jeito.", on);
+            if enabled != on {
+                self.config.lighting.enabled = enabled;
+                if enabled && self.config.lighting.effect == Effect::Off {
+                    self.config.lighting.effect = Effect::Static;
+                }
+                self.touch();
+            }
+            ui.add_space(12.0);
+            widgets::divider(ui, &pal);
+            ui.add_space(12.0);
+            if self.config.lighting.effect != Effect::Static {
+                ui.label(
+                    RichText::new("Ao editar uma cor, o efeito muda para Estático.")
+                        .size(12.0)
+                        .color(pal.text_muted),
+                );
+                ui.add_space(6.0);
+            }
+            if let Some(layout) = widgets::segmented(
+                ui,
+                &pal,
+                "layout",
+                &[(Layout::Uniform, "Uniforme"), (Layout::Zones, "Por zona")],
+                self.config.lighting.layout,
+            ) && layout != self.config.lighting.layout
+            {
+                self.config.lighting.layout = layout;
+                self.config.lighting.effect = Effect::Static;
+                self.config.lighting.enabled = true;
+                self.touch();
+            }
+            ui.add_space(12.0);
+            let target = if self.config.lighting.layout == Layout::Zones {
+                ui.horizontal(|ui| {
+                    for (index, zone_name) in ZONE_NAMES.iter().enumerate() {
+                        let color = self.config.lighting.zone_color(index);
+                        let label = format!("{}", index + 1);
+                        let response = ui.add(
+                            egui::Button::new(RichText::new(label).color(
+                                if color.luminance() > 0.4 {
+                                    Color32::BLACK
+                                } else {
+                                    Color32::WHITE
+                                },
+                            ))
+                            .fill(theme::color32(color))
+                            .min_size(vec2(52.0, 32.0))
+                            .stroke(Stroke::new(
+                                if index == self.selected_zone {
+                                    2.0
+                                } else {
+                                    0.0
+                                },
+                                theme::ACCENT,
+                            )),
+                        );
+                        if response.on_hover_text(*zone_name).clicked() {
+                            self.selected_zone = index;
+                        }
                     }
                 });
-                ui.add_space(theme::SCREEN_PAD);
+                ui.add_space(8.0);
+                widgets::section_label(
+                    ui,
+                    &pal,
+                    &format!(
+                        "Zona {} · {}",
+                        self.selected_zone + 1,
+                        ZONE_NAMES[self.selected_zone]
+                    ),
+                );
+                ColorTarget::Zone(self.selected_zone)
+            } else {
+                widgets::section_label(ui, &pal, "Cor do teclado");
+                ColorTarget::Uniform
+            };
+            ui.add_space(8.0);
+            self.color_controls(ui, pal, target);
+            if self.config.lighting.layout == Layout::Zones {
+                ui.add_space(4.0);
+                if widgets::button(
+                    ui,
+                    &pal,
+                    "Copiar cor para todas as zonas",
+                    Some(egui_phosphor::regular::COPY),
+                    ButtonKind::Ghost,
+                )
+                .clicked()
+                {
+                    self.config.lighting.zones = [self.target_color(target); ZONE_COUNT];
+                    self.config.lighting.effect = Effect::Static;
+                    self.config.lighting.enabled = true;
+                    self.touch();
+                }
+            }
+            ui.add_space(12.0);
+            widgets::divider(ui, &pal);
+            ui.add_space(12.0);
+            self.brightness_ui(ui, pal);
+        });
+        ui.add_space(12.0);
+        self.quick_profiles(ui, pal);
+        self.history_actions(ui, pal);
+    }
+
+    fn color_controls(&mut self, ui: &mut Ui, pal: Palette, target: ColorTarget) {
+        let current = self.target_color(target);
+        match swatch_row(ui, &pal, current) {
+            SwatchPick::Color(color) => self.set_target_color(target, color),
+            SwatchPick::Custom => self.open_color_editor(target),
+            SwatchPick::None => {}
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(current.hex())
+                    .font(theme::font(12.0, Weight::Medium))
+                    .color(pal.text_muted),
+            );
+            ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, &pal, "Personalizar cor", None, ButtonKind::Ghost).clicked()
+                {
+                    self.open_color_editor(target);
+                }
             });
+        });
+    }
+
+    fn brightness_ui(&mut self, ui: &mut Ui, pal: Palette) {
+        if matches!(self.config.lighting.effect, Effect::Cycle | Effect::Wave) {
+            ui.label(
+                RichText::new("O brilho e as cores deste efeito são definidos pelo teclado.")
+                    .size(12.0)
+                    .color(pal.text_muted),
+            );
+        } else if self.config.lighting.effect != Effect::Off
+            && widgets::slider_row(
+                ui,
+                &pal,
+                "Brilho",
+                &mut self.config.lighting.brightness,
+                1..=100,
+            )
+        {
+            self.touch();
+        }
     }
 
     fn effects_tab(&mut self, ui: &mut Ui, pal: Palette) {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(theme::SCREEN_PAD);
-                centered(ui, theme::CONTENT_SMALL, |ui| {
-                    let mut changed = false;
-                    let mut picked = None;
-
-                    widgets::panel_card(
-                        ui,
-                        &pal,
-                        Some((egui_phosphor::regular::SPARKLE, "Efeitos")),
-                        |ui| {
-                            let avail = ui.available_width();
-                            let per_row = if avail >= 470.0 { 2 } else { 1 };
-                            let card_w = if per_row == 2 {
-                                (avail - 12.0) * 0.5
+        widgets::panel_card(
+            ui,
+            &pal,
+            Some((egui_phosphor::regular::SPARKLE, "Efeitos do teclado")),
+            |ui| {
+                for effect in Effect::ALL {
+                    let selected = self.config.lighting.effect == effect;
+                    let response = ui.add(
+                        egui::Button::new(RichText::new(effect.label()).size(14.0))
+                            .fill(if selected {
+                                pal.accent_tint()
                             } else {
-                                avail
-                            };
-                            let mut index = 0;
-                            while index < Effect::ALL.len() {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 12.0;
-                                    for offset in 0..per_row {
-                                        let Some(effect) =
-                                            Effect::ALL.get(index + offset).copied()
-                                        else {
-                                            break;
-                                        };
-                                        let response = widgets::choice_card(
-                                            ui,
-                                            &pal,
-                                            vec2(card_w, 102.0),
-                                            effect_icon(effect),
-                                            effect.label(),
-                                            effect.description(),
-                                            self.config.effect == effect,
-                                        );
-                                        if response.clicked() {
-                                            picked = Some(effect);
-                                        }
-                                    }
-                                });
-                                index += per_row;
-                                ui.add_space(12.0);
-                            }
-                        },
+                                pal.input
+                            })
+                            .stroke(Stroke::new(
+                                1.0,
+                                if selected { theme::ACCENT } else { pal.border },
+                            ))
+                            .min_size(vec2(ui.available_width(), 38.0)),
                     );
-
-                    if let Some(effect) = picked
-                        && effect != self.config.effect
-                    {
-                        self.config.effect = effect;
-                        self.config.enabled = effect != Effect::Off;
-                        changed = true;
-                    }
-
-                    ui.add_space(12.0);
-
-                    widgets::panel_card(
-                        ui,
-                        &pal,
-                        Some((egui_phosphor::regular::SLIDERS, "Ajustes do efeito")),
-                        |ui| {
-                            match self.config.effect {
-                                Effect::Off => {
-                                    ui.label(
-                                        RichText::new(
-                                            "A iluminação está desligada. Escolha um efeito acima para acender o teclado.",
-                                        )
-                                        .font(theme::font(12.5, Weight::Regular))
-                                        .color(pal.text_muted),
-                                    );
-                                }
-                                Effect::Static => {
-                                    ui.label(
-                                        RichText::new(
-                                            "O efeito estático usa as cores configuradas na aba Iluminação.",
-                                        )
-                                        .font(theme::font(12.5, Weight::Regular))
-                                        .color(pal.text_muted),
-                                    );
-                                }
-                                Effect::Cycle => {
-                                    ui.label(
-                                        RichText::new(
-                                            "O ciclo percorre todo o espectro e ignora a cor escolhida.",
-                                        )
-                                        .font(theme::font(12.5, Weight::Regular))
-                                        .color(pal.text_muted),
-                                    );
-                                }
-                                _ => {
-                                    widgets::section_label(ui, &pal, "Cor do efeito");
-                                    ui.add_space(8.0);
-                                    match swatch_row(ui, &pal, self.config.effect_color) {
-                                        SwatchPick::Color(color) => {
-                                            self.config.effect_color = color;
-                                            changed = true;
-                                        }
-                                        SwatchPick::Custom => {
-                                            self.open_color_editor(ColorTarget::Effect);
-                                        }
-                                        SwatchPick::None => {}
-                                    }
-                                    ui.add_space(10.0);
-                                }
-                            }
-
-                            if matches!(
-                                self.config.effect,
-                                Effect::Breathing | Effect::Cycle | Effect::Wave
-                            ) {
-                                widgets::divider(ui, &pal);
-                                ui.add_space(10.0);
-                                let mut speed = self.config.speed;
-                                if widgets::slider_row(
-                                    ui,
-                                    &pal,
-                                    "Velocidade",
-                                    &mut speed,
-                                    1..=100,
-                                ) {
-                                    self.config.speed = speed;
-                                    changed = true;
-                                }
-                                ui.add_space(4.0);
-                                ui.label(
-                                    RichText::new("Mais à direita, mais rápido.")
-                                        .font(theme::font(11.5, Weight::Regular))
-                                        .color(pal.text_muted),
-                                );
-                            }
-
-                            if self.config.effect == Effect::Wave {
-                                ui.add_space(10.0);
-                                widgets::divider(ui, &pal);
-                                ui.add_space(10.0);
-                                widgets::section_label(ui, &pal, "Direção da onda");
-                                ui.add_space(8.0);
-                                if let Some(direction) = widgets::segmented(
-                                    ui,
-                                    &pal,
-                                    "wave-direction",
-                                    &[
-                                        (WaveDirection::LeftToRight, "Esquerda → Direita"),
-                                        (WaveDirection::RightToLeft, "Direita → Esquerda"),
-                                    ],
-                                    self.config.direction,
-                                ) && direction != self.config.direction
-                                {
-                                    self.config.direction = direction;
-                                    changed = true;
-                                }
-                                ui.add_space(8.0);
-                                if let Some(direction) = widgets::segmented(
-                                    ui,
-                                    &pal,
-                                    "wave-direction-radial",
-                                    &[
-                                        (WaveDirection::CenterToEdge, "Centro → Bordas"),
-                                        (WaveDirection::EdgeToCenter, "Bordas → Centro"),
-                                    ],
-                                    self.config.direction,
-                                ) && direction != self.config.direction
-                                {
-                                    self.config.direction = direction;
-                                    changed = true;
-                                }
-                            }
-                        },
-                    );
-
-                    if changed {
+                    if response.on_hover_text(effect.description()).clicked() {
+                        self.config.lighting.effect = effect;
+                        self.config.lighting.enabled = effect != Effect::Off;
                         self.touch();
                     }
+                }
+                ui.add_space(10.0);
+                let effect = self.config.lighting.effect;
+                ui.label(
+                    RichText::new(effect.description())
+                        .size(12.0)
+                        .color(pal.text_muted),
+                );
+                if effect == Effect::Breathing {
+                    ui.add_space(10.0);
+                    self.color_controls(ui, pal, ColorTarget::Effect);
+                }
+                if matches!(effect, Effect::Breathing | Effect::Cycle | Effect::Wave) {
+                    ui.add_space(10.0);
+                    if widgets::slider_row(
+                        ui,
+                        &pal,
+                        "Velocidade",
+                        &mut self.config.lighting.speed,
+                        1..=100,
+                    ) {
+                        self.touch();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Suave").size(11.0).color(pal.text_muted));
+                        ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new("Rápida").size(11.0).color(pal.text_muted));
+                        });
+                    });
+                }
+                if effect == Effect::Wave {
+                    ui.add_space(8.0);
+                    egui::ComboBox::from_id_salt("wave-direction")
+                        .selected_text(self.config.lighting.direction.label())
+                        .width(ui.available_width() - 8.0)
+                        .show_ui(ui, |ui| {
+                            for direction in WaveDirection::ALL {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.lighting.direction,
+                                        direction,
+                                        direction.label(),
+                                    )
+                                    .changed()
+                                {
+                                    self.touch();
+                                }
+                            }
+                        });
+                }
+                ui.add_space(12.0);
+                self.brightness_ui(ui, pal);
+                if effect == Effect::Static
+                    && widgets::button(
+                        ui,
+                        &pal,
+                        "Editar cores e zonas",
+                        None,
+                        ButtonKind::Secondary,
+                    )
+                    .clicked()
+                {
+                    self.tab = Tab::Lighting;
+                }
+            },
+        );
+        self.history_actions(ui, pal);
+    }
+
+    fn quick_profiles(&mut self, ui: &mut Ui, pal: Palette) {
+        widgets::panel_card(
+            ui,
+            &pal,
+            Some((egui_phosphor::regular::STACK, "Uma ideia para começar")),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for profile in config::builtin_profiles() {
+                        if widgets::button(ui, &pal, &profile.name, None, ButtonKind::Secondary)
+                            .clicked()
+                        {
+                            self.config.lighting = profile.lighting;
+                            self.touch();
+                            self.notify(format!("Perfil {} selecionado", profile.name));
+                        }
+                    }
                 });
-                ui.add_space(theme::SCREEN_PAD);
+                ui.add_space(4.0);
+                if widgets::button(
+                    ui,
+                    &pal,
+                    "Salvar ou gerenciar perfis",
+                    Some(egui_phosphor::regular::ARROW_RIGHT),
+                    ButtonKind::Ghost,
+                )
+                .clicked()
+                {
+                    self.tab = Tab::Profiles;
+                }
+            },
+        );
+    }
+
+    fn history_actions(&mut self, ui: &mut Ui, pal: Palette) {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(self.undo.is_some(), |ui| {
+                if widgets::button(
+                    ui,
+                    &pal,
+                    "Desfazer",
+                    Some(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE),
+                    ButtonKind::Ghost,
+                )
+                .clicked()
+                {
+                    self.undo_lighting();
+                }
             });
+            ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, &pal, "Restaurar padrão", None, ButtonKind::Ghost).clicked()
+                {
+                    self.config.lighting = Lighting::default();
+                    self.touch();
+                    self.notify("Iluminação padrão restaurada. Você pode desfazer.");
+                }
+            });
+        });
+    }
+
+    fn undo_lighting(&mut self) {
+        if let Some(previous) = self.undo.take() {
+            self.config.lighting = previous;
+            self.touch();
+            self.notify("Alteração desfeita");
+        }
     }
 
     fn device_tab(&mut self, ui: &mut Ui, pal: Palette) {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        ui.scope(|ui| {
                 ui.add_space(theme::SCREEN_PAD);
                 centered(ui, theme::CONTENT_SMALL, |ui| {
                     widgets::panel_card(
@@ -1129,14 +1053,14 @@ impl G213App {
                                     }
                                 }
                                 ConnectionState::NotFound => {
-                                    widgets::callout(
+                                    if widgets::callout(
                                         ui,
                                         &pal,
                                         theme::STATUS_OFFLINE,
                                         egui_phosphor::regular::PLUG,
                                         "Teclado não encontrado. Conecte o G213 por USB.",
                                         Some("Atualizar"),
-                                    );
+                                    ) { self.refresh(); }
                                 }
                                 ConnectionState::Searching => {
                                     widgets::callout(
@@ -1149,7 +1073,7 @@ impl G213App {
                                     );
                                 }
                                 ConnectionState::Error => {
-                                    widgets::callout(
+                                    if widgets::callout(
                                         ui,
                                         &pal,
                                         theme::STATUS_DANGER,
@@ -1159,7 +1083,7 @@ impl G213App {
                                             .as_deref()
                                             .unwrap_or("Falha ao acessar o teclado."),
                                         Some("Atualizar"),
-                                    );
+                                    ) { self.refresh(); }
                                 }
                             }
                         },
@@ -1183,7 +1107,9 @@ impl G213App {
                             widgets::hairline(ui, &pal, 0.0);
                             widgets::kv_row(ui, &pal, "Protocolo", "Logitech G213 / OpenRGB");
                             widgets::hairline(ui, &pal, 0.0);
-                            widgets::kv_row(ui, &pal, "Interface", "OpenLogi");
+                            widgets::kv_row(ui, &pal, "Referência visual", "OpenLogi");
+                            ui.hyperlink_to("Conhecer o OpenLogi", "https://github.com/AprilNEA/OpenLogi");
+                            ui.label(RichText::new("Projeto independente, sem afiliação com Logitech ou OpenLogi.").size(11.5).color(pal.text_muted));
                             ui.add_space(12.0);
                             ui.label(
                                 RichText::new(format!(
@@ -1229,13 +1155,8 @@ impl G213App {
                             .color(pal.text),
                     );
                     ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
-                        if widgets::icon_button(
-                            ui,
-                            &pal,
-                            egui_phosphor::regular::X,
-                            "Fechar",
-                        )
-                        .clicked()
+                        if widgets::icon_button(ui, &pal, egui_phosphor::regular::X, "Fechar")
+                            .clicked()
                         {
                             open = false;
                         }
@@ -1266,12 +1187,14 @@ impl G213App {
                 widgets::hairline(ui, &pal, 0.0);
                 widgets::kv_row(ui, &pal, "Versão", env!("CARGO_PKG_VERSION"));
                 widgets::hairline(ui, &pal, 0.0);
-                widgets::kv_row(ui, &pal, "Tema da interface", "OpenLogi");
+                widgets::kv_row(ui, &pal, "Aparência", self.config.theme.label());
                 ui.add_space(12.0);
                 ui.label(
-                    RichText::new(
-                        "As alterações são aplicadas ao teclado e salvas automaticamente.",
-                    )
+                    RichText::new(if self.preview {
+                        "Neste modo, as alterações são temporárias e não acessam o teclado."
+                    } else {
+                        "As alterações são salvas neste computador e enviadas ao G213 conectado."
+                    })
                     .font(theme::font(11.5, Weight::Regular))
                     .color(pal.text_muted),
                 );
@@ -1307,13 +1230,8 @@ impl G213App {
                             .color(pal.text),
                     );
                     ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
-                        if widgets::icon_button(
-                            ui,
-                            &pal,
-                            egui_phosphor::regular::X,
-                            "Fechar",
-                        )
-                        .clicked()
+                        if widgets::icon_button(ui, &pal, egui_phosphor::regular::X, "Fechar")
+                            .clicked()
                         {
                             open = false;
                         }
@@ -1364,13 +1282,22 @@ impl G213App {
                 }
 
                 ui.add_space(10.0);
+                let valid = Rgb::from_hex(&editor.hex).is_some();
+                if !valid {
+                    ui.colored_label(
+                        theme::STATUS_DANGER,
+                        "Use seis dígitos hexadecimais: #RRGGBB.",
+                    );
+                }
                 ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(ui, &pal, "Aplicar", None, ButtonKind::Primary).clicked() {
-                        apply = true;
-                        open = false;
-                    }
-                    if widgets::button(ui, &pal, "Cancelar", None, ButtonKind::Secondary)
-                        .clicked()
+                    ui.add_enabled_ui(valid, |ui| {
+                        if widgets::button(ui, &pal, "Aplicar", None, ButtonKind::Primary).clicked()
+                        {
+                            apply = true;
+                            open = false;
+                        }
+                    });
+                    if widgets::button(ui, &pal, "Cancelar", None, ButtonKind::Secondary).clicked()
                     {
                         open = false;
                     }
@@ -1383,7 +1310,7 @@ impl G213App {
         if apply {
             let target = editor.target;
             self.set_target_color(target, editor.color);
-            self.notify("Cor aplicada");
+            self.notify("Cor selecionada");
         }
         if open {
             self.color_editor = Some(editor);
@@ -1420,22 +1347,32 @@ impl G213App {
     }
 }
 
-impl eframe::App for G213App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+impl G213App {
+    fn render(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
 
         if self.last_status_check.elapsed() >= Duration::from_millis(400) {
             self.last_status_check = Instant::now();
-            self.status = self.worker.status();
+            if let Some(worker) = &self.worker {
+                self.status = worker.status();
+            }
         }
         if self.preferred != Some(self.config.theme) {
             theme::set_preference(&ctx, self.config.theme);
             self.preferred = Some(self.config.theme);
         }
         self.save_if_due();
+        if !self.settings_open && self.color_editor.is_none() && !ctx.text_edit_focused() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.view = View::Home;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+                self.undo_lighting();
+            }
+        }
 
         let dark = theme::resolve_dark(&ctx, self.config.theme);
-        let pal = Palette::palette(dark);
+        let pal = Palette::for_mode(dark);
 
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, pal.page);
@@ -1449,7 +1386,7 @@ impl eframe::App for G213App {
 
         let body = Rect::from_min_max(
             pos2(full.min.x, full.min.y + theme::HEADER_H),
-            full.max,
+            pos2(full.max.x, full.max.y - 36.0),
         );
         let mut body_ui = shell.new_child(
             UiBuilder::new()
@@ -1461,11 +1398,57 @@ impl eframe::App for G213App {
             View::Detail => self.detail_ui(&mut body_ui, pal),
         }
 
+        let footer = Rect::from_min_max(pos2(full.left(), full.bottom() - 36.0), full.max);
+        ui.painter().rect_filled(footer, 0.0, pal.page);
+        ui.painter()
+            .hline(footer.x_range(), footer.top(), Stroke::new(1.0, pal.border));
+        let mut footer_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(footer.shrink2(vec2(24.0, 0.0)))
+                .layout(ELayout::left_to_right(Align::Center)),
+        );
+        let (message, color) = if self.preview {
+            ("Prévia · alterações temporárias", theme::ACCENT)
+        } else if self.save_error.is_some() {
+            ("Falha ao salvar · veja Dispositivo", theme::STATUS_DANGER)
+        } else if self.dirty {
+            ("Salvando alterações…", pal.text_muted)
+        } else {
+            ("Configuração local · salvamento automático", pal.text_muted)
+        };
+        footer_ui.label(RichText::new(message).size(11.0).color(color));
+        footer_ui.with_layout(ELayout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .size(11.0)
+                    .color(pal.text_muted),
+            );
+            if !self.preview && !self.status.is_connected() {
+                ui.label(
+                    RichText::new("Será aplicada ao conectar")
+                        .size(11.0)
+                        .color(pal.text_muted),
+                );
+            }
+        });
         self.settings_modal(&ctx, pal);
         self.color_modal(&ctx, pal);
         self.toast_ui(&ctx, pal);
 
-        ctx.request_repaint_after(Duration::from_millis(500));
+        let animated = self.view == View::Detail
+            && matches!(self.tab, Tab::Lighting | Tab::Effects)
+            && self.config.lighting.enabled
+            && matches!(
+                self.config.lighting.effect,
+                Effect::Breathing | Effect::Cycle | Effect::Wave
+            );
+        ctx.request_repaint_after(Duration::from_millis(if animated { 33 } else { 500 }));
+    }
+}
+
+impl eframe::App for G213App {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1474,14 +1457,15 @@ impl eframe::App for G213App {
             ThemeMode::Dark => true,
             ThemeMode::System => true,
         };
-        Palette::palette(dark).page.to_normalized_gamma_f32()
+        Palette::for_mode(dark).page.to_normalized_gamma_f32()
     }
 }
 
 impl Drop for G213App {
     fn drop(&mut self) {
-        // The debounce may not have fired when the window is closed.
-        let _ = self.config.save();
+        if self.dirty && !self.preview {
+            let _ = self.config.save();
+        }
     }
 }
 
@@ -1503,16 +1487,6 @@ fn centered(ui: &mut Ui, width: f32, add_contents: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn effect_icon(effect: Effect) -> &'static str {
-    match effect {
-        Effect::Off => egui_phosphor::regular::POWER,
-        Effect::Static => egui_phosphor::regular::LIGHTBULB,
-        Effect::Breathing => egui_phosphor::regular::DROP,
-        Effect::Cycle => egui_phosphor::regular::ARROW_CLOCKWISE,
-        Effect::Wave => egui_phosphor::regular::WAVES,
-    }
-}
-
 fn modal_frame(pal: &Palette) -> Frame {
     Frame::new()
         .fill(pal.panel)
@@ -1523,7 +1497,7 @@ fn modal_frame(pal: &Palette) -> Frame {
 
 fn swatch_row(ui: &mut Ui, pal: &Palette, current: Rgb) -> SwatchPick {
     let mut pick = SwatchPick::None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for color in SWATCHES {
             if widgets::swatch(ui, pal, color, current == color).clicked() {
@@ -1536,83 +1510,6 @@ fn swatch_row(ui: &mut Ui, pal: &Palette, current: Rgb) -> SwatchPick {
         }
     });
     pick
-}
-
-fn paint_text(
-    ui: &Ui,
-    pos: Pos2,
-    text: &str,
-    size: f32,
-    weight: Weight,
-    color: Color32,
-) -> Rect {
-    ui.painter().text(
-        pos,
-        Align2::LEFT_TOP,
-        text,
-        theme::font(size, weight),
-        color,
-    )
-}
-
-fn pill_width(ui: &Ui, label: &str) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        theme::font(11.5, Weight::Medium),
-        Color32::WHITE,
-    );
-    22.0 + galley.size().x + 12.0
-}
-
-fn paint_pill(ui: &Ui, pal: &Palette, top_left: Pos2, label: &str, color: Color32) -> Rect {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), theme::font(11.5, Weight::Medium), color);
-    let rect = Rect::from_min_size(
-        top_left,
-        vec2(22.0 + galley.size().x + 12.0, 24.0),
-    );
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        theme::blend(color, pal.panel, 0.14),
-        Stroke::new(1.0, theme::blend(color, pal.panel, 0.32)),
-        StrokeKind::Inside,
-    );
-    ui.painter()
-        .circle_filled(pos2(rect.left() + 11.0, rect.center().y), 3.5, color);
-    ui.painter().galley(
-        pos2(rect.left() + 20.0, rect.center().y - galley.size().y * 0.5),
-        galley,
-        color,
-    );
-    rect
-}
-
-fn paint_badge(ui: &Ui, pal: &Palette, top_left: Pos2, label: &str) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        theme::font(11.0, Weight::Medium),
-        pal.text_muted,
-    );
-    let width = galley.size().x + 16.0;
-    let rect = Rect::from_min_size(top_left, vec2(width, 21.0));
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(11),
-        pal.muted,
-        Stroke::new(1.0, pal.border),
-        StrokeKind::Inside,
-    );
-    ui.painter().galley(
-        pos2(
-            rect.center().x - galley.size().x * 0.5,
-            rect.center().y - galley.size().y * 0.5,
-        ),
-        galley,
-        pal.text_muted,
-    );
-    width
 }
 
 fn code_block(ui: &mut Ui, pal: &Palette, command: &str) {
@@ -1629,4 +1526,109 @@ fn code_block(ui: &mut Ui, pal: &Palette, command: &str) {
                     .color(pal.text),
             );
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(app: &mut G213App, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1120.0, 760.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn click_text(app: &mut G213App, ctx: &egui::Context, label: &str) {
+        frame(app, ctx, vec![]);
+        let output = frame(app, ctx, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == label
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("Visible control not found: {label}"));
+        for pressed in [true, false] {
+            frame(
+                app,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn gallery_zone_edit_undo_and_profile_save_flow() {
+        let ctx = egui::Context::default();
+        let mut app = G213App::with_context(&ctx, true);
+        click_text(&mut app, &ctx, "Personalizar");
+        assert_eq!(app.view, View::Detail);
+        click_text(&mut app, &ctx, "Por zona");
+        assert_eq!(app.config.lighting.layout, Layout::Zones);
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(app.config.lighting.layout, Layout::Uniform);
+        click_text(&mut app, &ctx, "Perfis");
+        click_text(&mut app, &ctx, "Nome do perfil");
+        frame(&mut app, &ctx, vec![egui::Event::Text("Trabalho".into())]);
+        click_text(&mut app, &ctx, "Salvar perfil");
+        assert_eq!(app.config.profiles.len(), 1);
+        assert_eq!(app.config.profiles[0].name, "Trabalho");
+        assert!(app.worker.is_none());
+        app.save_if_due();
+        assert!(app.dirty, "preview must never persist changes");
+    }
+
+    #[test]
+    fn invalid_hex_cannot_be_applied_and_static_edits_replace_native_effect() {
+        let ctx = egui::Context::default();
+        let mut app = G213App::with_context(&ctx, true);
+        app.view = View::Detail;
+        app.config.lighting.effect = Effect::Cycle;
+        app.open_color_editor(ColorTarget::Uniform);
+        app.color_editor.as_mut().unwrap().hex = "aé123".into();
+        click_text(&mut app, &ctx, "Aplicar");
+        assert!(app.color_editor.is_some());
+        assert_eq!(app.config.lighting.effect, Effect::Cycle);
+        app.color_editor.as_mut().unwrap().hex = "#123456".into();
+        app.color_editor.as_mut().unwrap().color = Rgb::new(0x12, 0x34, 0x56);
+        click_text(&mut app, &ctx, "Aplicar");
+        assert!(app.color_editor.is_none());
+        assert_eq!(app.config.lighting.effect, Effect::Static);
+        assert_eq!(app.config.lighting.color, Rgb::new(0x12, 0x34, 0x56));
+    }
 }

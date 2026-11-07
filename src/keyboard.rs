@@ -9,14 +9,23 @@ use egui::{
     Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, pos2, vec2,
 };
-use std::ops::Range;
 
 const KEY_ROWS: [[f32; 15]; 5] = [
-    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 0.5],
-    [1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 0.0],
-    [1.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.25, 0.0, 0.0],
-    [2.25, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.75, 0.0, 0.0],
-    [1.25, 1.25, 1.25, 6.25, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 0.5,
+    ],
+    [
+        1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 0.0,
+    ],
+    [
+        1.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.25, 0.0, 0.0,
+    ],
+    [
+        2.25, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.75, 0.0, 0.0,
+    ],
+    [
+        1.25, 1.25, 1.25, 6.25, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ],
 ];
 
 const MAIN_COLS: f32 = 15.0;
@@ -98,15 +107,25 @@ pub fn keyboard(
     let function_h = unit * 0.55;
     let function_gap = unit * 0.12;
     let function_keys = 16;
-    let function_w = (TOTAL_COLS * unit - (function_keys - 1) as f32 * key_gap) / function_keys as f32;
+    let function_w =
+        (TOTAL_COLS * unit - (function_keys - 1) as f32 * key_gap) / function_keys as f32;
     for index in 0..function_keys {
         let x = keys_left + index as f32 * (function_w + key_gap);
-        let key = Rect::from_min_size(
-            pos2(x, keys_top),
-            vec2(function_w, function_h),
+        let key = Rect::from_min_size(pos2(x, keys_top), vec2(function_w, function_h));
+        let zone = zone_for_x(
+            key.center().x,
+            keys_left,
+            main_width,
+            nav_left,
+            numpad_left,
+            unit,
         );
-        let zone = zone_for_x(key.center().x, keys_left, main_width, nav_left, numpad_left, unit);
-        paint_key(ui, key, key_radius, key_color(state, zone, key_base, key_off));
+        paint_key(
+            ui,
+            key,
+            key_radius,
+            key_color(state, zone, key_base, key_off),
+        );
     }
 
     // Main block.
@@ -119,12 +138,21 @@ pub fn keyboard(
                 continue;
             }
             let w = width_units * unit;
-            let key = Rect::from_min_size(
-                pos2(x, y),
-                vec2(w - key_gap, unit - key_gap),
+            let key = Rect::from_min_size(pos2(x, y), vec2(w - key_gap, unit - key_gap));
+            let zone = zone_for_x(
+                key.center().x,
+                keys_left,
+                main_width,
+                nav_left,
+                numpad_left,
+                unit,
             );
-            let zone = zone_for_x(key.center().x, keys_left, main_width, nav_left, numpad_left, unit);
-            paint_key(ui, key, key_radius, key_color(state, zone, key_base, key_off));
+            paint_key(
+                ui,
+                key,
+                key_radius,
+                key_color(state, zone, key_base, key_off),
+            );
             x += w;
         }
     }
@@ -161,7 +189,10 @@ pub fn keyboard(
 
     // Branding, kept tiny so it reads as a texture rather than a label.
     ui.painter().text(
-        pos2(bottom_left(body).x + unit * 0.4, body.bottom() - unit * 0.22),
+        pos2(
+            bottom_left(body).x + unit * 0.4,
+            body.bottom() - unit * 0.22,
+        ),
         Align2::LEFT_BOTTOM,
         "G213",
         FontId::proportional((unit * 0.26).clamp(7.0, 10.0)),
@@ -170,11 +201,20 @@ pub fn keyboard(
 
     // Selected zone outline.
     if let Some(zone) = state.selected_zone {
-        let block = zone_block(zone, keys_left, keys_top, main_width, nav_left, numpad_left, unit, function_h + function_gap);
+        let block = zone_block(
+            zone,
+            keys_left,
+            keys_top,
+            main_width,
+            nav_left,
+            numpad_left,
+            unit,
+            function_h + function_gap,
+        );
         ui.painter().rect(
             block,
             CornerRadius::same(8),
-            theme::blend(theme::ACCENT, body_fill, 0.08),
+            Color32::from_rgba_unmultiplied(59, 130, 246, 20),
             Stroke::new(2.0, theme::ACCENT),
             StrokeKind::Inside,
         );
@@ -210,11 +250,7 @@ fn average_color(colors: &[Color32; 5]) -> Color32 {
         sum[2] += u32::from(color.b());
     }
     let n = colors.len() as u32;
-    Color32::from_rgb(
-        (sum[0] / n) as u8,
-        (sum[1] / n) as u8,
-        (sum[2] / n) as u8,
-    )
+    Color32::from_rgb((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8)
 }
 
 fn zone_for_x(
@@ -271,12 +307,7 @@ fn zone_block(
     Rect::from_min_max(pos2(x, top - unit * 0.15), pos2(x + w, bottom))
 }
 
-fn key_color(
-    state: &KeyboardState,
-    zone: usize,
-    key_base: Color32,
-    key_off: Color32,
-) -> Color32 {
+fn key_color(state: &KeyboardState, zone: usize, key_base: Color32, key_off: Color32) -> Color32 {
     if !state.enabled {
         return key_off;
     }
@@ -286,8 +317,7 @@ fn key_color(
 }
 
 fn paint_key(ui: &Ui, rect: Rect, radius: CornerRadius, fill: Color32) {
-    ui.painter()
-        .rect_filled(rect, radius, fill);
+    ui.painter().rect_filled(rect, radius, fill);
     // A subtle top highlight gives the flat keys a cap-like edge.
     let highlight = Rect::from_min_size(rect.min, vec2(rect.width(), 1.0));
     ui.painter().rect_filled(
@@ -300,9 +330,4 @@ fn paint_key(ui: &Ui, rect: Rect, radius: CornerRadius, fill: Color32) {
         },
         Color32::from_rgba_unmultiplied(255, 255, 255, 18),
     );
-}
-
-/// Ranges of the five zones, used by the settings list to draw a tiny legend.
-pub fn zone_ranges() -> [Range<usize>; 5] {
-    [0..1, 1..2, 2..3, 3..4, 4..5]
 }

@@ -75,12 +75,6 @@ impl DeviceStatus {
         self.state == ConnectionState::Connected
     }
 
-    pub fn display_name(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| "Logitech G213 Prodigy".to_string())
-    }
-
     pub fn path_label(&self) -> String {
         self.path
             .as_ref()
@@ -112,15 +106,15 @@ pub struct ApplyState {
 impl From<&crate::config::Config> for ApplyState {
     fn from(config: &crate::config::Config) -> Self {
         Self {
-            enabled: config.enabled,
-            layout: config.layout,
-            color: config.color,
-            zones: config.zones,
-            brightness: config.brightness,
-            effect: config.effect,
-            effect_color: config.effect_color,
-            speed: config.speed,
-            direction: config.direction,
+            enabled: config.lighting.enabled,
+            layout: config.lighting.layout,
+            color: config.lighting.color,
+            zones: config.lighting.zones,
+            brightness: config.lighting.brightness,
+            effect: config.lighting.effect,
+            effect_color: config.lighting.effect_color,
+            speed: config.lighting.speed,
+            direction: config.lighting.direction,
         }
     }
 }
@@ -200,10 +194,17 @@ fn uevent_value(uevent: &str, key: &str) -> Option<String> {
 }
 
 fn is_control_interface(descriptor: &[u8]) -> bool {
-    let has_usage_page = descriptor
-        .windows(3)
-        .any(|window| window == [0x06, 0x43, 0xff]);
-    let has_report_id = descriptor.windows(2).any(|window| window == [0x85, REPORT_ID]);
+    let has_usage_page = descriptor.windows(3).any(|window| {
+        window
+            == [
+                0x06,
+                CONTROL_USAGE_PAGE as u8,
+                (CONTROL_USAGE_PAGE >> 8) as u8,
+            ]
+    });
+    let has_report_id = descriptor
+        .windows(2)
+        .any(|window| window == [0x85, REPORT_ID]);
     has_usage_page && has_report_id
 }
 
@@ -225,6 +226,18 @@ pub struct G213 {
 }
 
 impl G213 {
+    /// Detect an unplug even while no lighting changes are being sent.
+    fn disconnected(&self) -> bool {
+        let mut descriptor = libc::pollfd {
+            fd: self.fd,
+            events: 0,
+            revents: 0,
+        };
+        // SAFETY: one live pollfd, no blocking, and the file owns fd for this call.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        ready > 0 && descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = fs::OpenOptions::new()
             .read(true)
@@ -275,24 +288,13 @@ impl G213 {
         self.send(&build_direct_packet(zone, color))
     }
 
-    pub fn set_mode(
-        &self,
-        mode: u8,
-        color: Rgb,
-        speed: u8,
-        direction: u8,
-    ) -> io::Result<()> {
+    pub fn set_mode(&self, mode: u8, color: Rgb, speed: u8, direction: u8) -> io::Result<()> {
         self.send(&build_mode_packet(mode, color, speed, direction))
     }
 
     fn send(&self, packet: &[u8; PACKET_LEN]) -> io::Result<()> {
-        let written = unsafe {
-            libc::write(
-                self.fd,
-                packet.as_ptr().cast::<libc::c_void>(),
-                PACKET_LEN,
-            )
-        };
+        let written =
+            unsafe { libc::write(self.fd, packet.as_ptr().cast::<libc::c_void>(), PACKET_LEN) };
         if written < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -315,11 +317,7 @@ impl G213 {
         if ready > 0 && poll_fd.revents & libc::POLLIN != 0 {
             let mut ack = [0u8; PACKET_LEN];
             unsafe {
-                libc::read(
-                    self.fd,
-                    ack.as_mut_ptr().cast::<libc::c_void>(),
-                    PACKET_LEN,
-                );
+                libc::read(self.fd, ack.as_mut_ptr().cast::<libc::c_void>(), PACKET_LEN);
             }
         }
         Ok(())
@@ -446,7 +444,11 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
     }
 
     loop {
-        let timeout = next_scan.saturating_duration_since(Instant::now());
+        let timeout = if device.is_some() {
+            RECONNECT_INTERVAL
+        } else {
+            next_scan.saturating_duration_since(Instant::now())
+        };
         match rx.recv_timeout(timeout.max(Duration::from_millis(50))) {
             Ok(Command::Apply(state)) => {
                 wanted = Some(*state);
@@ -478,6 +480,13 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
             }
         }
 
+        if device.as_ref().is_some_and(G213::disconnected) {
+            device = None;
+            found = None;
+            need_apply = true;
+            next_scan = Instant::now();
+        }
+
         if device.is_none() && Instant::now() >= next_scan {
             try_connect(&mut found, &mut device, &status);
             next_scan = Instant::now() + RECONNECT_INTERVAL;
@@ -486,20 +495,21 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
             }
         }
 
-        if need_apply
-            && let (Some(dev), Some(state)) = (device.as_ref(), wanted.as_ref())
-        {
+        if need_apply && let (Some(dev), Some(state)) = (device.as_ref(), wanted.as_ref()) {
             match dev.apply(state) {
                 Ok(()) => {
                     need_apply = false;
                     if let Some(found) = found.as_ref() {
-                        set_status(&status, DeviceStatus::connected(found.path.clone(), found.name.clone()));
+                        set_status(
+                            &status,
+                            DeviceStatus::connected(found.path.clone(), found.name.clone()),
+                        );
                     }
                 }
                 Err(err) => {
                     let permission_denied = err.kind() == io::ErrorKind::PermissionDenied;
                     device = None;
-                    let mut next = DeviceStatus {
+                    let next = DeviceStatus {
                         state: if permission_denied {
                             ConnectionState::PermissionDenied
                         } else {
@@ -509,9 +519,9 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
                         name: found.as_ref().map(|found| found.name.clone()),
                         detail: Some(err.to_string()),
                     };
-                    next.detail = Some(err.to_string());
                     set_status(&status, next);
-                    next_scan = Instant::now();
+                    found = None;
+                    next_scan = Instant::now() + RECONNECT_INTERVAL;
                 }
             }
         }
@@ -675,6 +685,20 @@ pub fn run_off() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_disconnect_is_detected_without_writing() {
+        use std::os::fd::OwnedFd;
+        let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let file = fs::File::from(OwnedFd::from(socket));
+        let device = G213 {
+            fd: file.as_raw_fd(),
+            file,
+        };
+        assert!(!device.disconnected());
+        drop(peer);
+        assert!(device.disconnected());
+    }
 
     #[test]
     fn direct_packet_matches_openrgb_layout() {

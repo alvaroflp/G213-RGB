@@ -13,13 +13,8 @@ use std::path::PathBuf;
 pub const ZONE_COUNT: usize = 5;
 
 /// Portuguese labels for the five areas, in protocol order (`0x01..=0x05`).
-pub const ZONE_NAMES: [&str; ZONE_COUNT] = [
-    "Esquerda",
-    "Centro",
-    "Direita",
-    "Setas / Home",
-    "Numpad",
-];
+pub const ZONE_NAMES: [&str; ZONE_COUNT] =
+    ["Esquerda", "Centro", "Direita", "Setas / Home", "Numpad"];
 
 /// A plain sRGB colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,8 +40,9 @@ impl Rgb {
 
     /// Parses `#RRGGBB` or `RRGGBB`.
     pub fn from_hex(text: &str) -> Option<Self> {
-        let text = text.trim().trim_start_matches('#');
-        if text.len() != 6 {
+        let text = text.trim();
+        let text = text.strip_prefix('#').unwrap_or(text);
+        if text.len() != 6 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return None;
         }
         let r = u8::from_str_radix(&text[0..2], 16).ok()?;
@@ -206,9 +202,9 @@ impl ThemeMode {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Config {
+pub struct Lighting {
     pub enabled: bool,
     pub layout: Layout,
     pub color: Rgb,
@@ -220,10 +216,9 @@ pub struct Config {
     /// 1..=100, where 100 is the fastest. Mapped onto the device's 10..=200.
     pub speed: u8,
     pub direction: WaveDirection,
-    pub theme: ThemeMode,
 }
 
-impl Default for Config {
+impl Default for Lighting {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -241,12 +236,11 @@ impl Default for Config {
             effect_color: Rgb::ACCENT,
             speed: 55,
             direction: WaveDirection::LeftToRight,
-            theme: ThemeMode::System,
         }
     }
 }
 
-impl Config {
+impl Lighting {
     /// Clamp values that came from a hand-edited file.
     pub fn sanitize(&mut self) {
         self.brightness = self.brightness.clamp(1, 100);
@@ -264,25 +258,96 @@ impl Config {
         }
     }
 
-    /// Colour used for the device illustration.
-    pub fn preview_color(&self) -> Rgb {
-        match self.layout {
-            Layout::Uniform => self.color,
-            Layout::Zones => {
-                let sum = self.zones.iter().fold([0u32; 3], |mut acc, c| {
-                    acc[0] += u32::from(c.r);
-                    acc[1] += u32::from(c.g);
-                    acc[2] += u32::from(c.b);
-                    acc
-                });
-                let n = ZONE_COUNT as u32;
-                Rgb::new(
-                    (sum[0] / n) as u8,
-                    (sum[1] / n) as u8,
-                    (sum[2] / n) as u8,
-                )
-            }
+    /// Approximate the native animation without sending animation frames to HID.
+    pub fn preview_colors(&self, seconds: f64) -> [Rgb; ZONE_COUNT] {
+        if !self.enabled || self.effect == Effect::Off {
+            return [Rgb::BLACK; ZONE_COUNT];
         }
+        let phase = (seconds / (f64::from(protocol_speed(self.speed)) / 10.0)) as f32;
+        let rainbow = |phase: f32| {
+            let colors = [
+                Rgb::new(255, 60, 80),
+                Rgb::new(255, 190, 40),
+                Rgb::new(40, 220, 120),
+                Rgb::new(30, 180, 255),
+                Rgb::new(140, 80, 255),
+                Rgb::new(255, 60, 80),
+            ];
+            let position = phase.rem_euclid(1.0) * 5.0;
+            let index = (position.floor() as usize).min(4);
+            colors[index].lerp(colors[index + 1], position.fract())
+        };
+        match self.effect {
+            Effect::Static => match self.layout {
+                Layout::Uniform => [self.color.scaled(self.brightness); ZONE_COUNT],
+                Layout::Zones => self.zones.map(|c| c.scaled(self.brightness)),
+            },
+            Effect::Breathing => {
+                let pulse = (0.5 + 0.5 * (phase * std::f32::consts::TAU).cos())
+                    * f32::from(self.brightness);
+                [self.effect_color.scaled(pulse.round() as u8); ZONE_COUNT]
+            }
+            Effect::Cycle => [rainbow(phase); ZONE_COUNT],
+            Effect::Wave => std::array::from_fn(|zone| {
+                let x = zone as f32 / (ZONE_COUNT - 1) as f32;
+                let offset = match self.direction {
+                    WaveDirection::LeftToRight => -x,
+                    WaveDirection::RightToLeft => x,
+                    WaveDirection::CenterToEdge => -(x - 0.5).abs() * 2.0,
+                    WaveDirection::EdgeToCenter => (x - 0.5).abs() * 2.0,
+                };
+                rainbow(phase + offset * 0.7)
+            }),
+            Effect::Off => [Rgb::BLACK; ZONE_COUNT],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub lighting: Lighting,
+}
+
+/// Keep the original flat JSON compatible with versions before profiles.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    #[serde(flatten)]
+    pub lighting: Lighting,
+    pub theme: ThemeMode,
+    pub profiles: Vec<Profile>,
+}
+
+impl Config {
+    pub fn sanitize(&mut self) {
+        self.lighting.sanitize();
+        for profile in &mut self.profiles {
+            profile.lighting.sanitize();
+        }
+    }
+
+    pub fn save_profile(&mut self, name: &str) -> Result<(), &'static str> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 40 {
+            return Err("Use um nome de 1 a 40 caracteres.");
+        }
+        if self
+            .profiles
+            .iter()
+            .chain(builtin_profiles().iter())
+            .any(|p| p.name.to_lowercase() == name.to_lowercase())
+        {
+            return Err("Já existe um perfil com esse nome.");
+        }
+        if self.profiles.len() >= 32 {
+            return Err("Você já tem 32 perfis. Remova um para continuar.");
+        }
+        self.profiles.push(Profile {
+            name: name.to_owned(),
+            lighting: self.lighting.clone(),
+        });
+        Ok(())
     }
 
     pub fn load() -> Self {
@@ -317,6 +382,55 @@ impl Config {
         fs::rename(&tmp, &path)?;
         Ok(())
     }
+}
+
+pub fn builtin_profiles() -> Vec<Profile> {
+    let make = |name: &str, lighting| Profile {
+        name: name.into(),
+        lighting,
+    };
+    vec![
+        make(
+            "Aurora",
+            Lighting {
+                layout: Layout::Zones,
+                zones: [
+                    Rgb::new(93, 72, 238),
+                    Rgb::new(145, 70, 255),
+                    Rgb::new(215, 71, 190),
+                    Rgb::new(47, 185, 210),
+                    Rgb::new(46, 218, 164),
+                ],
+                ..Lighting::default()
+            },
+        ),
+        make(
+            "Foco",
+            Lighting {
+                color: Rgb::WHITE,
+                brightness: 40,
+                ..Lighting::default()
+            },
+        ),
+        make(
+            "Oceano",
+            Lighting {
+                effect: Effect::Breathing,
+                effect_color: Rgb::new(0, 190, 220),
+                speed: 30,
+                brightness: 75,
+                ..Lighting::default()
+            },
+        ),
+        make(
+            "Espectro",
+            Lighting {
+                effect: Effect::Wave,
+                speed: 55,
+                ..Lighting::default()
+            },
+        ),
+    ]
 }
 
 /// The device protocol's internal speed: 10 is fastest, 200 is slowest.
@@ -355,6 +469,9 @@ mod tests {
         assert_eq!(Rgb::from_hex("3B82F6"), Some(color));
         assert_eq!(Rgb::from_hex("#3b82f"), None);
         assert_eq!(Rgb::from_hex("#gg82f6"), None);
+        for invalid in ["aé123", "💡ab", "##123456", "１２", "12345g"] {
+            assert_eq!(Rgb::from_hex(invalid), None);
+        }
     }
 
     #[test]
@@ -376,8 +493,74 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let config = Config::default();
-        assert!(config.enabled);
-        assert_eq!(config.brightness, 100);
-        assert_eq!(config.zones.len(), ZONE_COUNT);
+        assert!(config.lighting.enabled);
+        assert_eq!(config.lighting.brightness, 100);
+        assert_eq!(config.lighting.zones.len(), ZONE_COUNT);
+    }
+
+    #[test]
+    fn old_flat_config_retains_lighting_and_theme() {
+        let mut config: Config = serde_json::from_str(r##"{"color":{"r":19,"g":85,"b":170},"layout":"zones","brightness":42,"effect":"breathing","speed":0,"theme":"dark"}"##).unwrap();
+        config.sanitize();
+        assert_eq!(config.lighting.color, Rgb::new(19, 85, 170));
+        assert_eq!(config.lighting.layout, Layout::Zones);
+        assert_eq!(config.lighting.brightness, 42);
+        assert_eq!(config.lighting.speed, 1);
+        assert_eq!(config.lighting.effect, Effect::Breathing);
+        assert_eq!(config.theme, ThemeMode::Dark);
+        assert!(config.profiles.is_empty());
+    }
+
+    #[test]
+    fn profiles_round_trip_independently_of_current_lighting_and_theme() {
+        let mut config = Config {
+            theme: ThemeMode::Dark,
+            ..Config::default()
+        };
+        config.lighting = builtin_profiles().remove(0).lighting;
+        config.save_profile("  Trabalho  ").unwrap();
+        let saved = config.lighting.clone();
+        config.lighting = Lighting::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.profiles[0].name, "Trabalho");
+        assert_eq!(restored.profiles[0].lighting, saved);
+        assert_eq!(restored.lighting, Lighting::default());
+        assert_eq!(restored.theme, ThemeMode::Dark);
+        assert!(!json.contains("\"lighting\":{\"lighting\""));
+    }
+
+    #[test]
+    fn profile_names_are_validated_without_overwriting_existing_profiles() {
+        let mut config = Config::default();
+        assert!(config.save_profile("  ").is_err());
+        assert!(config.save_profile("aurora").is_err());
+        assert!(config.save_profile(&"x".repeat(41)).is_err());
+        config.save_profile("Concentração").unwrap();
+        assert!(config.save_profile("CONCENTRAÇÃO").is_err());
+        assert_eq!(config.profiles.len(), 1);
+    }
+
+    #[test]
+    fn preview_respects_power_brightness_and_native_effect_capabilities() {
+        let mut lighting = Lighting {
+            brightness: 50,
+            ..Lighting::default()
+        };
+        assert_eq!(
+            lighting.preview_colors(0.0),
+            [lighting.color.scaled(50); ZONE_COUNT]
+        );
+        lighting.effect = Effect::Cycle;
+        let cycle = lighting.preview_colors(0.3);
+        lighting.brightness = 1;
+        lighting.effect_color = Rgb::BLACK;
+        assert_eq!(lighting.preview_colors(0.3), cycle);
+        assert_ne!(lighting.preview_colors(3.0), cycle);
+        lighting.effect = Effect::Wave;
+        let wave = lighting.preview_colors(0.0);
+        assert_ne!(wave[0], wave[1]);
+        lighting.enabled = false;
+        assert_eq!(lighting.preview_colors(0.0), [Rgb::BLACK; ZONE_COUNT]);
     }
 }
