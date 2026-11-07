@@ -109,14 +109,31 @@ fn run_saved(profile_name: Option<&str>) -> i32 {
     0
 }
 
+/// Bundled 256×256 icon, used by the window manager and the task bar.
+fn app_icon() -> Option<egui::IconData> {
+    let pixels = image::load_from_memory(include_bytes!("../assets/g213-rgb.png"))
+        .ok()?
+        .into_rgba8();
+    Some(egui::IconData {
+        rgba: pixels.as_raw().clone(),
+        width: pixels.width(),
+        height: pixels.height(),
+    })
+}
+
 fn run_gui(preview: bool) -> i32 {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("G213 RGB")
+        .with_app_id("g213-rgb")
+        .with_inner_size([1120.0, 760.0])
+        .with_min_inner_size([900.0, 620.0])
+        .with_resizable(true);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("G213 RGB")
-            .with_app_id("g213-rgb")
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([900.0, 620.0])
-            .with_resizable(true),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };

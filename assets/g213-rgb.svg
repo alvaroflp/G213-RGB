@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="G213 RGB">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#252a33"/>
+      <stop offset="1" stop-color="#101217"/>
+    </linearGradient>
+    <linearGradient id="rgb" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff3c50"/>
+      <stop offset="0.25" stop-color="#ffbe28"/>
+      <stop offset="0.5" stop-color="#28dc78"/>
+      <stop offset="0.75" stop-color="#1eb4ff"/>
+      <stop offset="1" stop-color="#8c50ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#background)"/>
+  <rect x="28" y="70" width="200" height="116" rx="18" fill="#2c323b" stroke="#3d444f" stroke-width="2"/>
+
+  <g fill="url(#rgb)">
+    <rect x="44" y="84" width="20" height="20" rx="5"/>
+    <rect x="72" y="84" width="20" height="20" rx="5"/>
+    <rect x="100" y="84" width="20" height="20" rx="5"/>
+    <rect x="128" y="84" width="20" height="20" rx="5"/>
+    <rect x="156" y="84" width="20" height="20" rx="5"/>
+    <rect x="184" y="84" width="28" height="20" rx="5"/>
+
+    <rect x="44" y="110" width="28" height="20" rx="5"/>
+    <rect x="80" y="110" width="20" height="20" rx="5"/>
+    <rect x="108" y="110" width="20" height="20" rx="5"/>
+    <rect x="136" y="110" width="20" height="20" rx="5"/>
+    <rect x="164" y="110" width="48" height="20" rx="5"/>
+
+    <rect x="44" y="136" width="48" height="20" rx="5"/>
+    <rect x="100" y="136" width="20" height="20" rx="5"/>
+    <rect x="128" y="136" width="20" height="20" rx="5"/>
+    <rect x="156" y="136" width="20" height="20" rx="5"/>
+    <rect x="184" y="136" width="28" height="20" rx="5"/>
+  </g>
+
+  <rect x="72" y="162" width="112" height="12" rx="6" fill="url(#rgb)" opacity="0.9"/>
+</svg>

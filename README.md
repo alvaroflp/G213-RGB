@@ -45,36 +45,70 @@ controles respeitam as capacidades documentadas do G213.
 A identidade do aplicativo é própria. Não há afiliação com OpenLogi ou Logitech.
 Nenhum recurso exige conta, telemetria ou download de imagem em tempo de execução.
 
-## Compilar e executar
+## Instalar e executar
 
 Requisitos: Linux com X11 ou Wayland e OpenGL; **Rust 1.95 ou mais recente**,
 conforme o requisito do egui 0.36. Instale as ferramentas de compilação C e as
 bibliotecas de desenvolvimento do ambiente gráfico da sua distribuição.
 
-```sh
-cargo build --locked --release
-./target/release/g213-rgb
-```
-
-Para conhecer a interface sem acessar o hardware nem modificar sua configuração:
-
-```sh
-cargo run --locked -- --preview
-```
-
-O modo de prévia começa com a configuração padrão e descarta as alterações ao
-fechar. Para controlar o dispositivo, execute sem `--preview`.
-
-Na primeira execução pode ser necessário liberar o acesso a `/dev/hidraw*`:
+A forma mais simples é executar o instalador:
 
 ```sh
 ./install.sh
 ```
 
-O instalador solicita `sudo`, instala `/etc/udev/rules.d/60-g213-rgb.rules` e
-recarrega as regras. **Desconecte e reconecte o teclado** depois da instalação.
-A regra utiliza `uaccess` para permitir acesso pela sessão local do usuário;
-o aplicativo funciona sem root.
+Ele compila o aplicativo, copia o executável para `~/.local/bin`, instala os
+ícones e cria o atalho **G213 RGB** no menu de aplicativos. Também instala a
+regra udev de acesso ao teclado (o `sudo` é solicitado apenas para essa etapa).
+
+Depois da instalação, abra **G213 RGB** no menu do sistema ou execute:
+
+```sh
+g213-rgb
+```
+
+Caso `~/.local/bin` não esteja no `PATH`, o instalador mostra a linha necessária
+para adicioná-lo. Para instalar para todos os usuários em `/usr/local`:
+
+```sh
+./install.sh --system
+```
+
+| Opção | Ação |
+| --- | --- |
+| `./install.sh` | Compila e instala para o usuário atual em `~/.local`. |
+| `./install.sh --system` | Instala em `/usr/local` (requer `sudo`). |
+| `./install.sh --no-build` | Usa o binário já presente em `target/release`. |
+| `./install.sh --no-udev` | Não altera as regras udev. |
+| `./install.sh --uninstall` | Remove o executável, o atalho, os ícones e a regra udev. |
+| `./install.sh --uninstall --purge` | Também apaga a configuração e os perfis. |
+
+Se o teclado já estava conectado, **desconecte e reconecte-o** após a instalação
+para que a nova permissão passe a valer. A regra utiliza `uaccess` para permitir
+o acesso pela sessão local do usuário; o aplicativo funciona sem root.
+
+### Executar sem instalar
+
+Para testar direto do código-fonte, sem copiar arquivos para o sistema:
+
+```sh
+./run.sh
+```
+
+O script compila quando necessário e repassa os argumentos para o aplicativo:
+
+```sh
+./run.sh --preview
+```
+
+Para conhecer a interface sem acessar o hardware nem modificar sua configuração,
+use `--preview`. O modo de prévia começa com a configuração padrão e descarta as
+alterações ao fechar. Também é possível compilar manualmente:
+
+```sh
+cargo build --locked --release
+./target/release/g213-rgb
+```
 
 ## Configuração e perfis
 
@@ -131,6 +165,9 @@ continua dependendo de um G213 conectado e com acesso liberado.
 | `src/product.rs` | Carregamento da imagem incorporada do produto. |
 | `src/keyboard.rs` | Simulação interativa das cinco zonas. |
 | `src/theme.rs`, `src/widgets.rs` | Paleta, tipografia, ícones e controles. |
+| `install.sh` | Compila e instala o aplicativo, o atalho e a regra udev. |
+| `run.sh` | Compila e executa sem instalar. |
+| `assets/g213-rgb.svg`, `assets/g213-rgb.png` | Ícone do atalho e da janela. |
 | `udev/60-g213-rgb.rules` | Regra de acesso ao dispositivo. |
 
 ## Protocolo e créditos
