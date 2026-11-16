@@ -202,6 +202,8 @@ preserva a configuração se o teclado não for encontrado ou a aplicação falh
 
 ## Desenvolvimento e validação
 
+Para contribuir com outro dispositivo, siga o [guia de integração em AGENTS.md](AGENTS.md).
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
