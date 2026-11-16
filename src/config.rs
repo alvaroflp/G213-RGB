@@ -273,6 +273,17 @@ impl Lighting {
         }
     }
 
+    pub fn is_on(&self) -> bool {
+        self.enabled && self.effect != Effect::Off
+    }
+
+    pub fn set_power(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if enabled && self.effect == Effect::Off {
+            self.effect = Effect::Static;
+        }
+    }
+
     pub fn render_color(&self, color: Rgb) -> Rgb {
         color.with_hue(self.hue).scaled(self.brightness)
     }
@@ -391,6 +402,13 @@ impl Config {
             self.mouse
         }
         .as_lighting()
+    }
+
+    /// Set an absolute state for both devices, even if only one was on.
+    pub fn set_all_lights(&mut self, enabled: bool) {
+        self.lighting.set_power(enabled);
+        self.mouse.enabled = enabled;
+        self.shared.enabled = enabled;
     }
 
     pub fn sanitize(&mut self) {

@@ -29,6 +29,23 @@ impl G213App {
                 self.peripheral_dialog = Some(true);
             }
         });
+        self.global_power_ui(ui, pal, "Iluminação dos dispositivos");
+    }
+
+    fn global_power_ui(&mut self, ui: &mut Ui, pal: Palette, title: &str) {
+        let keyboard = self.config.keyboard_lighting().is_on();
+        let mouse = self.config.mouse_lighting().is_on();
+        let both_on = keyboard && mouse;
+        let description = if keyboard != mouse {
+            "Um dispositivo está aceso. Clique para acender ambos."
+        } else {
+            "Liga ou desliga teclado e mouse juntos."
+        };
+        let enabled = widgets::toggle_row(ui, &pal, title, description, both_on);
+        if enabled != both_on {
+            self.config.set_all_lights(enabled);
+            self.touch();
+        }
     }
 
     fn sync_label(&self) -> &'static str {
@@ -120,6 +137,7 @@ impl G213App {
                     "Iluminação do G203"
                 });
                 if shared {
+                    self.global_power_ui(ui, pal, "Iluminação do teclado e do mouse");
                     ui.label("A mesma cor estática, brilho e matiz no teclado e no mouse.");
                     let active = widgets::toggle_row(
                         ui,
@@ -139,7 +157,7 @@ impl G213App {
                     self.config.mouse
                 };
                 let original = light;
-                solid_controls(ui, pal, &mut light);
+                solid_controls(ui, pal, &mut light, shared);
                 if light != original {
                     if shared {
                         self.config.shared = light;
@@ -185,15 +203,17 @@ impl G213App {
     }
 }
 
-fn solid_controls(ui: &mut Ui, pal: Palette, light: &mut SolidLight) {
+fn solid_controls(ui: &mut Ui, pal: Palette, light: &mut SolidLight, shared: bool) {
     widgets::divider(ui, &pal);
-    light.enabled = widgets::toggle_row(
-        ui,
-        &pal,
-        "Iluminação",
-        "Liga ou desliga os LEDs.",
-        light.enabled,
-    );
+    if !shared {
+        light.enabled = widgets::toggle_row(
+            ui,
+            &pal,
+            "Iluminação do mouse",
+            "Controla os LEDs do G203.",
+            light.enabled,
+        );
+    }
     ui.horizontal(|ui| {
         let mut rgb = [light.color.r, light.color.g, light.color.b];
         if ui.color_edit_button_srgb(&mut rgb).changed() {

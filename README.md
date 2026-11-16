@@ -46,6 +46,10 @@ O aplicativo controla um teclado e um mouse por vez. **Buscar dispositivos**
 atualiza a galeria e tenta acessar os modelos compatíveis conectados por USB.
 O reconhecimento também ocorre automaticamente ao conectar o cabo.
 
+Use **Iluminação dos dispositivos** na galeria para ligar ou desligar teclado
+e mouse juntos. Se apenas um estiver aceso, o primeiro clique acende os dois.
+Os controles individuais ficam nas telas do teclado e do mouse.
+
 Com **Sincronizar cores**, os dois dispositivos recebem a mesma cor estática,
 brilho e matiz. As configurações individuais voltam ao desativar a sincronização.
 O brilho escala a cor até o máximo disponível no hardware. A matiz gira o tom

@@ -683,14 +683,16 @@ impl G213App {
 
     fn lighting_tab(&mut self, ui: &mut Ui, pal: Palette) {
         widgets::panel_card(ui, &pal, None, |ui| {
-            let on = self.config.lighting.enabled && self.config.lighting.effect != Effect::Off;
-            let enabled =
-                widgets::toggle_row(ui, &pal, "Iluminação", "Acenda o teclado do seu jeito.", on);
+            let on = self.config.lighting.is_on();
+            let enabled = widgets::toggle_row(
+                ui,
+                &pal,
+                "Iluminação do teclado",
+                "Controla os LEDs do G213.",
+                on,
+            );
             if enabled != on {
-                self.config.lighting.enabled = enabled;
-                if enabled && self.config.lighting.effect == Effect::Off {
-                    self.config.lighting.effect = Effect::Static;
-                }
+                self.config.lighting.set_power(enabled);
                 self.touch();
             }
             ui.add_space(12.0);
@@ -1659,6 +1661,37 @@ mod tests {
         assert!(app.worker.is_none());
         app.save_if_due();
         assert!(app.dirty, "preview must never persist changes");
+    }
+
+    #[test]
+    fn global_power_from_mixed_state_keeps_both_devices_in_step() {
+        let ctx = egui::Context::default();
+        let mut app = G213App::with_context(&ctx, true);
+        app.config.lighting.enabled = false;
+        app.config.lighting.effect = Effect::Breathing;
+        app.config.mouse.color = Rgb::WHITE;
+        app.touch();
+        assert!(!app.applied.0.enabled && app.applied.1.enabled);
+
+        for enabled in [true, false, true] {
+            click_text(&mut app, &ctx, "Iluminação dos dispositivos");
+            assert_eq!(
+                (app.applied.0.enabled, app.applied.1.enabled),
+                (enabled, enabled)
+            );
+        }
+        assert_eq!(app.applied.0.effect, Effect::Breathing);
+        assert_eq!(app.applied.1.color, Rgb::WHITE);
+
+        click_text(&mut app, &ctx, "Sincronizar cores");
+        click_text(&mut app, &ctx, "Iluminação do teclado e do mouse");
+        assert!(!app.applied.0.enabled && !app.applied.1.enabled);
+        click_text(&mut app, &ctx, "Sincronização");
+        assert!(!app.applied.0.enabled && !app.applied.1.enabled);
+        click_text(&mut app, &ctx, "Iluminação do teclado e do mouse");
+        assert!(app.applied.0.enabled && app.applied.1.enabled);
+        click_text(&mut app, &ctx, "Sincronização");
+        assert!(app.applied.0.enabled && app.applied.1.enabled);
     }
 
     #[test]
