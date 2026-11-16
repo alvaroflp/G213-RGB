@@ -90,6 +90,7 @@ enum SwatchPick {
 
 pub struct G213App {
     config: Config,
+    tray: Option<crate::tray::Tray>,
     macro_editor: macro_editor::Editor,
     macro_worker: Option<crate::macros::Worker>,
     worker: Option<DeviceWorker>,
@@ -121,8 +122,13 @@ pub struct G213App {
 }
 
 impl G213App {
-    pub fn new(cc: &eframe::CreationContext<'_>, preview: bool) -> Self {
-        Self::with_context(&cc.egui_ctx, preview)
+    pub fn new(cc: &eframe::CreationContext<'_>, preview: bool, background: bool) -> Self {
+        let mut app = Self::with_context(&cc.egui_ctx, preview);
+        if !preview {
+            app.tray =
+                crate::tray::Tray::start(&cc.egui_ctx, background && app.config.keep_in_tray);
+        }
+        app
     }
 
     fn with_context(ctx: &egui::Context, preview: bool) -> Self {
@@ -168,6 +174,7 @@ impl G213App {
             profile_error: None,
             deleted_profile: None,
             config,
+            tray: None,
             macro_worker,
             macro_editor: macro_editor::Editor::default(),
             worker,
@@ -1274,6 +1281,18 @@ impl G213App {
                 ui.add_space(14.0);
                 self.autostart_ui(ui, pal);
                 ui.add_space(8.0);
+                let available = self.tray.as_ref().is_some_and(crate::tray::Tray::available);
+                let keep = ui.add_enabled_ui(!self.preview, |ui| {
+                    widgets::toggle_row(ui, &pal, "Manter na bandeja ao fechar",
+                        if available { "A iluminação e as macros continuam em execução." }
+                        else { "A janela só fica oculta se a bandeja estiver disponível." },
+                        self.config.keep_in_tray)
+                }).inner;
+                if keep != self.config.keep_in_tray {
+                    self.config.keep_in_tray = keep;
+                    self.touch();
+                }
+                ui.add_space(8.0);
                 widgets::divider(ui, &pal);
                 widgets::kv_row(ui, &pal, "Aplicativo", "G213 RGB");
                 widgets::hairline(ui, &pal, 0.0);
@@ -1453,7 +1472,6 @@ impl G213App {
             theme::set_preference(&ctx, self.config.theme);
             self.preferred = Some(self.config.theme);
         }
-        self.save_if_due();
         if !self.settings_open
             && self.peripheral_dialog.is_none()
             && self.color_editor.is_none()
@@ -1545,6 +1563,16 @@ impl G213App {
 }
 
 impl eframe::App for G213App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(tray) = &mut self.tray {
+            tray.update(ctx, self.config.keep_in_tray);
+        }
+        self.save_if_due();
+        if self.dirty && !self.preview {
+            ctx.request_repaint_after(Duration::from_millis(400));
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.render(ui);
     }

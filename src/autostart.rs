@@ -41,7 +41,7 @@ fn desktop_entry(executable: &str) -> io::Result<String> {
     }
     let exec = exec.replace('\\', "\\\\");
     Ok(format!(
-        "[Desktop Entry]\nType=Application\nName=G213 RGB\nExec=\"{exec}\"\nIcon=g213-rgb\nTerminal=false\n"
+        "[Desktop Entry]\nType=Application\nName=G213 RGB\nExec=\"{exec}\" --background\nIcon=g213-rgb\nTerminal=false\n"
     ))
 }
 
@@ -72,7 +72,9 @@ mod tests {
     #[test]
     fn desktop_exec_quotes_path_without_shell_expansion() {
         let entry = super::desktop_entry("/home/usuário/Área de trabalho/100%/g213-rgb").unwrap();
-        assert!(entry.contains("Exec=\"/home/usuário/Área de trabalho/100%%/g213-rgb\"\n"));
+        assert!(
+            entry.contains("Exec=\"/home/usuário/Área de trabalho/100%%/g213-rgb\" --background\n")
+        );
         assert!(super::desktop_entry("/bad\npath").is_err());
     }
 }

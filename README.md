@@ -53,8 +53,8 @@ A regra concede acesso à sessão local ativa para ler as entradas dos modelos
 compatíveis e emitir atalhos via `/dev/uinput`. O app roda como usuário comum e
 só monitora os gatilhos configurados quando **Executar macros** está ligado.
 A macro é executada no aplicativo em foco ao soltar o gatilho, além da ação
-original da tecla ou botão. As macros são salvas localmente e o app precisa
-estar aberto para executá-las. Para restaurar a execução após login, use
+original da tecla ou botão. As macros são salvas localmente e funcionam com a
+janela aberta ou com o aplicativo na bandeja. Para restaurar a execução após login, use
 **Ajustes → Iniciar com o sistema**.
 
 ## Escopo e referência
@@ -152,11 +152,21 @@ cargo build --locked --release
 ## Restaurar após reiniciar
 
 Abra **Ajustes → Iniciar com o sistema** pelo ícone de engrenagem. O aplicativo
-usa a inicialização automática XDG para abrir quando você entrar na sessão
-gráfica e reaplicar a configuração salva, inclusive quando detectar um dispositivo
-conectado depois do login. Use um caminho estável para o executável, como o criado
-por `./install.sh`. Após uma atualização da regra de acesso, reconecte os
-dispositivos.
+usa a inicialização automática XDG para reaplicar suas preferências ao entrar
+na sessão gráfica, inclusive quando detectar um dispositivo conectado depois
+do login. Ele inicia na bandeja quando **Manter na bandeja ao fechar** está
+ativo e o desktop oferece suporte. Se você já usava a inicialização automática,
+desative e ative a opção novamente para atualizar o atalho de login.
+
+## Bandeja do sistema
+
+O ícone do **G213 RGB** aparece no painel de ambientes com suporte a
+StatusNotifierItem/AppIndicator, como o Zorin com Zorin AppIndicator habilitado
+e o KDE Plasma. Por padrão, o **X** esconde a janela e a iluminação e as macros
+continuam em execução. No menu do ícone, use **Abrir G213 RGB** para voltar e
+**Sair** para encerrar. Em **Ajustes**, você também pode desativar o comportamento
+de manter o aplicativo na bandeja ao fechar. Se o painel não oferecer bandeja,
+o **X** encerra o aplicativo normalmente.
 
 ## Configuração e perfis
 
@@ -175,6 +185,7 @@ exibe o detalhe. Mudanças de tema ou criação de perfis não reenviam comandos
 | Comando | Ação |
 | --- | --- |
 | `g213-rgb` | Abre a interface. |
+| `g213-rgb --background` | Inicia na bandeja quando estiver disponível e ativada nos ajustes. |
 | `g213-rgb --preview` | Explora a interface sem hardware ou salvamento. |
 | `g213-rgb --diagnose` | Localiza a interface HID e testa o acesso. |
 | `g213-rgb --profiles` | Lista perfis locais e predefinidos. |

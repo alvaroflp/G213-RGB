@@ -11,6 +11,7 @@ mod keyboard;
 mod macros;
 mod product;
 mod theme;
+mod tray;
 mod widgets;
 
 use app::G213App;
@@ -20,6 +21,7 @@ G213 RGB — controle de iluminação do Logitech G213 Prodigy
 
 USO:
     g213-rgb               abre a interface gráfica
+    g213-rgb --background  inicia na bandeja, quando disponível
     g213-rgb --preview     explora a interface sem acessar o teclado ou salvar
     g213-rgb --profiles    lista perfis locais e predefinidos
     g213-rgb --profile N   aplica um perfil pelo nome e salva a seleção
@@ -46,8 +48,9 @@ fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        [] => run_gui(false),
-        ["--preview"] => run_gui(true),
+        [] => run_gui(false, false),
+        ["--background"] => run_gui(false, true),
+        ["--preview"] => run_gui(true, false),
         ["--diagnose" | "diagnose"] => device::run_diagnose(),
         ["--test" | "test"] => device::run_test(),
         ["--off" | "off"] => device::run_off(),
@@ -153,7 +156,7 @@ fn app_icon() -> Option<egui::IconData> {
     })
 }
 
-fn run_gui(preview: bool) -> i32 {
+fn run_gui(preview: bool, background: bool) -> i32 {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("G213 RGB")
         .with_app_id("g213-rgb")
@@ -173,7 +176,7 @@ fn run_gui(preview: bool) -> i32 {
     match eframe::run_native(
         "G213 RGB",
         options,
-        Box::new(move |cc| Ok(Box::new(G213App::new(cc, preview)))),
+        Box::new(move |cc| Ok(Box::new(G213App::new(cc, preview, background)))),
     ) {
         Ok(()) => 0,
         Err(err) => {

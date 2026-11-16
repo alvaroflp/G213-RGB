@@ -374,7 +374,7 @@ impl SolidLight {
 }
 
 /// Keep the original flat JSON compatible with versions before profiles.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     #[serde(flatten)]
@@ -385,6 +385,22 @@ pub struct Config {
     pub shared: SolidLight,
     pub sync_colors: bool,
     pub macros: crate::macros::Settings,
+    pub keep_in_tray: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            lighting: Lighting::default(),
+            theme: ThemeMode::default(),
+            profiles: Vec::new(),
+            mouse: SolidLight::default(),
+            shared: SolidLight::default(),
+            sync_colors: false,
+            macros: crate::macros::Settings::default(),
+            keep_in_tray: true,
+        }
+    }
 }
 
 impl Config {
@@ -626,6 +642,7 @@ mod tests {
         assert_eq!(config.lighting.speed, 1);
         assert_eq!(config.lighting.effect, Effect::Breathing);
         assert_eq!(config.theme, ThemeMode::Dark);
+        assert!(config.keep_in_tray);
         assert!(config.profiles.is_empty());
     }
 
