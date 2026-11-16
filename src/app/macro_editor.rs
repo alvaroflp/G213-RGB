@@ -235,6 +235,7 @@ impl G213App {
             let mut remove = None;
             let mut reorder = None;
             let count = draft.steps.len();
+            let shortcut_width = (ui.available_width() - 156.0).max(80.0);
             for (index, step) in draft.steps.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
                     ui.horizontal(|ui| {
@@ -244,7 +245,7 @@ impl G213App {
                                 ui.add(
                                     TextEdit::singleline(shortcut)
                                         .char_limit(48)
-                                        .desired_width((ui.available_width() - 100.0).max(90.0))
+                                        .desired_width(shortcut_width)
                                         .hint_text("Ctrl+Shift+T"),
                                 );
                             }
