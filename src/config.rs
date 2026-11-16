@@ -384,6 +384,7 @@ pub struct Config {
     pub mouse: SolidLight,
     pub shared: SolidLight,
     pub sync_colors: bool,
+    pub macros: crate::macros::Settings,
 }
 
 impl Config {

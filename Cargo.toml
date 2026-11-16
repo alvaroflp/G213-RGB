@@ -15,6 +15,7 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui = "0.36"
 egui-phosphor = "0.14"
+evdev = "0.13.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

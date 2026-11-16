@@ -8,6 +8,7 @@ mod autostart;
 mod config;
 mod device;
 mod keyboard;
+mod macros;
 mod product;
 mod theme;
 mod widgets;

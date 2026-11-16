@@ -28,6 +28,9 @@ impl G213App {
             {
                 self.peripheral_dialog = Some(true);
             }
+            if widgets::button(ui, &pal, "Macros", None, ButtonKind::Secondary).clicked() {
+                self.open_macros(crate::macros::Peripheral::Keyboard);
+            }
         });
         self.global_power_ui(ui, pal, "Iluminação dos dispositivos");
     }
@@ -98,10 +101,18 @@ impl G213App {
                 ui.label(error);
             }
             widgets::divider(ui, &pal);
-            if widgets::button(ui, &pal, "Personalizar mouse", None, ButtonKind::Primary).clicked()
-            {
-                self.peripheral_dialog = Some(self.config.sync_colors);
-            }
+            ui.horizontal_wrapped(|ui| {
+                if widgets::button(ui, &pal, "Personalizar mouse", None, ButtonKind::Primary)
+                    .clicked()
+                {
+                    self.peripheral_dialog = Some(self.config.sync_colors);
+                }
+                if widgets::button(ui, &pal, "Macros do mouse", None, ButtonKind::Secondary)
+                    .clicked()
+                {
+                    self.open_macros(crate::macros::Peripheral::Mouse);
+                }
+            });
         });
     }
 

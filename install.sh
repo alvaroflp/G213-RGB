@@ -9,6 +9,7 @@
 #   ./install.sh --system       instala em /usr/local (requer sudo)
 #   ./install.sh --no-build     usa o binário já compilado em target/release
 #   ./install.sh --no-udev      não instala a regra de acesso ao /dev/hidraw*
+#   ./install.sh --with-macros  autoriza as entradas Logitech e /dev/uinput para macros
 #   ./install.sh --uninstall    remove o aplicativo instalado
 #   ./install.sh --uninstall --purge
 #                               remove também a configuração e os perfis
@@ -25,6 +26,7 @@ MODE="user"
 ACTION="install"
 BUILD=1
 INSTALL_UDEV=1
+INSTALL_MACROS=0
 PURGE=0
 
 usage() {
@@ -36,6 +38,7 @@ Uso:
   ./install.sh --system       instala em /usr/local (requer sudo)
   ./install.sh --no-build     usa o binário já compilado em target/release
   ./install.sh --no-udev      não instala a regra de acesso ao /dev/hidraw*
+  ./install.sh --with-macros  autoriza as entradas Logitech e /dev/uinput para macros
   ./install.sh --uninstall    remove o aplicativo instalado
   ./install.sh --uninstall --purge
                               remove também a configuração e os perfis
@@ -53,6 +56,7 @@ while [ $# -gt 0 ]; do
         --system) MODE="system" ;;
         --no-build) BUILD=0 ;;
         --no-udev) INSTALL_UDEV=0 ;;
+        --with-macros) INSTALL_MACROS=1 ;;
         --uninstall | --remove) ACTION="uninstall" ;;
         --purge) PURGE=1 ;;
         -h | --help)
@@ -68,6 +72,11 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$INSTALL_MACROS" -eq 1 ] && [ "$INSTALL_UDEV" -eq 0 ]; then
+    echo "Use --with-macros sem --no-udev." >&2
+    exit 2
+fi
 
 if [ "$MODE" = "system" ]; then
     PREFIX=${PREFIX:-/usr/local}
@@ -89,6 +98,8 @@ APP_DIR="$PREFIX/share/applications"
 ICON_DIR="$PREFIX/share/icons/hicolor"
 RULE_SRC="$ROOT_DIR/udev/60-g213-rgb.rules"
 RULE_DEST="/etc/udev/rules.d/60-g213-rgb.rules"
+MACRO_RULE_SRC="$ROOT_DIR/udev/60-g213-rgb-macros.rules"
+MACRO_RULE_DEST="/etc/udev/rules.d/60-g213-rgb-macros.rules"
 
 # Executa comandos que gravam em diretórios do sistema.
 if [ "$(id -u)" -eq 0 ]; then
@@ -139,22 +150,34 @@ install_udev() {
 
     echo "Instalando regra de acesso aos dispositivos (sudo)..."
     run_system install -m 0644 "$RULE_SRC" "$RULE_DEST"
+    if [ "$INSTALL_MACROS" -eq 1 ]; then
+        run_system install -m 0644 "$MACRO_RULE_SRC" "$MACRO_RULE_DEST"
+        if [ ! -e /dev/uinput ] && command -v modprobe >/dev/null 2>&1; then
+            run_system modprobe uinput
+        fi
+    fi
 
     if command -v udevadm >/dev/null 2>&1; then
         run_system udevadm control --reload-rules
         run_system udevadm trigger --subsystem-match=hidraw
+        if [ "$INSTALL_MACROS" -eq 1 ] || [ -f "$MACRO_RULE_DEST" ]; then
+            run_system udevadm trigger --subsystem-match=input --sysname-match='event*'
+            run_system udevadm trigger --subsystem-match=misc --sysname-match=uinput
+        fi
     fi
 }
 
 remove_udev() {
-    if [ -f "$RULE_DEST" ]; then
+    if [ -f "$RULE_DEST" ] || [ -f "$MACRO_RULE_DEST" ]; then
         if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
             echo "Aviso: sudo não encontrado; remova manualmente $RULE_DEST." >&2
         else
-            run_system rm -f "$RULE_DEST"
+            run_system rm -f "$RULE_DEST" "$MACRO_RULE_DEST"
             if command -v udevadm >/dev/null 2>&1; then
                 run_system udevadm control --reload-rules
                 run_system udevadm trigger --subsystem-match=hidraw
+                run_system udevadm trigger --subsystem-match=input --sysname-match='event*'
+                run_system udevadm trigger --subsystem-match=misc --sysname-match=uinput
             fi
         fi
     fi

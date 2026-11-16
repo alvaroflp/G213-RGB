@@ -16,6 +16,7 @@ use egui::{
 };
 use std::time::{Duration, Instant};
 
+mod macro_editor;
 mod peripherals;
 mod profiles;
 
@@ -38,6 +39,7 @@ const SWATCHES: [Rgb; 9] = [
 enum View {
     Home,
     Detail,
+    Macros,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,8 @@ enum SwatchPick {
 
 pub struct G213App {
     config: Config,
+    macro_editor: macro_editor::Editor,
+    macro_worker: Option<crate::macros::Worker>,
     worker: Option<DeviceWorker>,
     mouse_worker: Option<DeviceWorker>,
     mouse_image: crate::product::ProductImage,
@@ -134,6 +138,10 @@ impl G213App {
         };
         theme::set_preference(ctx, config.theme);
 
+        let macro_worker = (!preview).then(crate::macros::Worker::start);
+        if let Some(worker) = &macro_worker {
+            worker.update(&config.macros);
+        }
         let worker = (!preview).then(DeviceWorker::start);
         let mouse_worker = (!preview).then(|| DeviceWorker::for_mouse(true));
         let applied = (
@@ -159,6 +167,8 @@ impl G213App {
             profile_error: None,
             deleted_profile: None,
             config,
+            macro_worker,
+            macro_editor: macro_editor::Editor::default(),
             worker,
             mouse_worker,
             applied,
@@ -318,13 +328,8 @@ impl G213App {
                 .max_rect(header.shrink2(vec2(24.0, 0.0)))
                 .layout(ELayout::left_to_right(Align::Center)),
         );
+        use crate::macros::Peripheral;
         if self.view == View::Home {
-            hud.label(
-                RichText::new(egui_phosphor::regular::KEYBOARD)
-                    .font(theme::icon(25.0))
-                    .color(theme::ACCENT),
-            );
-            hud.add_space(4.0);
             hud.label(RichText::new("G213 RGB").font(theme::font(19.0, Weight::SemiBold)));
         } else {
             if widgets::icon_button(
@@ -337,17 +342,79 @@ impl G213App {
             {
                 self.view = View::Home;
             }
-            hud.label(RichText::new("G213 Prodigy").font(theme::font(18.0, Weight::SemiBold)));
-            hud.add_space(if full.width() > 1050.0 { 40.0 } else { 12.0 });
+            hud.label(
+                RichText::new(if self.view == View::Macros {
+                    "Macros"
+                } else {
+                    "G213 Prodigy"
+                })
+                .font(theme::font(18.0, Weight::SemiBold)),
+            );
+        }
+
+        let nav_width = if self.view == View::Macros {
+            ["G213 Prodigy", "G203"]
+                .iter()
+                .map(|label| {
+                    ui.painter()
+                        .layout_no_wrap(
+                            (*label).into(),
+                            theme::font(13.0, Weight::Medium),
+                            pal.text,
+                        )
+                        .size()
+                        .x
+                        + 24.0
+                })
+                .sum::<f32>()
+                + 4.0
+        } else {
+            Tab::ALL
+                .iter()
+                .map(|tab| tab.label())
+                .chain(["Macros"])
+                .map(|label| {
+                    ui.painter()
+                        .layout_no_wrap(label.into(), theme::font(13.5, Weight::Medium), pal.text)
+                        .size()
+                        .x
+                        + 24.0
+                })
+                .sum::<f32>()
+                + 4.0 * ui.spacing().item_spacing.x
+        };
+        let nav = Rect::from_center_size(header.center(), vec2(nav_width, header.height()));
+        let mut tabs = ui.new_child(
+            UiBuilder::new()
+                .max_rect(nav)
+                .layout(ELayout::left_to_right(Align::Center)),
+        );
+        if self.view == View::Macros {
+            if let Some(device) = widgets::segmented(
+                &mut tabs,
+                &pal,
+                "macro-device",
+                &[
+                    (Peripheral::Keyboard, "G213 Prodigy"),
+                    (Peripheral::Mouse, "G203"),
+                ],
+                self.macro_editor.device,
+            ) {
+                self.open_macros(device);
+            }
+        } else if self.view == View::Detail {
             for tab in Tab::ALL {
                 let kind = if self.tab == tab {
                     ButtonKind::Secondary
                 } else {
                     ButtonKind::Ghost
                 };
-                if widgets::button(&mut hud, &pal, tab.label(), None, kind).clicked() {
+                if widgets::button(&mut tabs, &pal, tab.label(), None, kind).clicked() {
                     self.tab = tab;
                 }
+            }
+            if widgets::button(&mut tabs, &pal, "Macros", None, ButtonKind::Ghost).clicked() {
+                self.open_macros(Peripheral::Keyboard);
             }
         }
         hud.with_layout(ELayout::right_to_left(Align::Center), |ui| {
@@ -361,18 +428,7 @@ impl G213App {
             {
                 self.settings_open = true;
             }
-            if self.view == View::Home {
-                if widgets::icon_button(
-                    ui,
-                    &pal,
-                    egui_phosphor::regular::ARROW_CLOCKWISE,
-                    "Buscar dispositivos",
-                )
-                .clicked()
-                {
-                    self.refresh();
-                }
-            } else {
+            if self.view == View::Detail {
                 widgets::status_pill(ui, &pal, self.status_label(), self.status_color());
             }
         });
@@ -406,11 +462,6 @@ impl G213App {
                     ui.label(
                         RichText::new("Seus dispositivos")
                             .font(theme::font(28.0, Weight::SemiBold)),
-                    );
-                    ui.label(
-                        RichText::new("Personalize a iluminação do teclado e do mouse.")
-                            .size(14.0)
-                            .color(pal.text_muted),
                     );
                     ui.add_space(12.0);
                     self.connection_callout(ui, &pal);
@@ -614,11 +665,6 @@ impl G213App {
     }
 
     fn product_panel(&mut self, ui: &mut Ui, pal: Palette) {
-        ui.label(
-            RichText::new("FEITO PARA O SEU G213")
-                .font(theme::font(11.0, Weight::Medium))
-                .color(pal.text_muted),
-        );
         ui.add_space(2.0);
         ui.label(
             RichText::new(if self.tab == Tab::Lighting {
@@ -1445,6 +1491,7 @@ impl G213App {
         match self.view {
             View::Home => self.home_ui(&mut body_ui, pal),
             View::Detail => self.detail_ui(&mut body_ui, pal),
+            View::Macros => self.macros_ui(&mut body_ui, pal),
         }
 
         let footer = Rect::from_min_max(pos2(full.left(), full.bottom() - 36.0), full.max);
@@ -1692,6 +1739,37 @@ mod tests {
         assert!(app.applied.0.enabled && app.applied.1.enabled);
         click_text(&mut app, &ctx, "Sincronização");
         assert!(app.applied.0.enabled && app.applied.1.enabled);
+    }
+
+    #[test]
+    fn editor_saves_and_removes_a_mouse_macro() {
+        let ctx = egui::Context::default();
+        let mut app = G213App::with_context(&ctx, true);
+        click_text(&mut app, &ctx, "Macros do mouse");
+        assert_eq!(app.view, View::Macros);
+        click_text(&mut app, &ctx, "Voltar  ·  Sem macro    ›");
+        click_text(&mut app, &ctx, "Ex.: Reabrir aba");
+        frame(&mut app, &ctx, vec![egui::Event::Text("Nova aba".into())]);
+        click_text(&mut app, &ctx, "Ctrl+Shift+T");
+        frame(&mut app, &ctx, vec![egui::Event::Text("Ctrl+T".into())]);
+        click_text(&mut app, &ctx, "Adicionar pausa");
+        click_text(&mut app, &ctx, "Salvar macro");
+        let saved = &app.config.macros.bindings[0];
+        assert_eq!(saved.device, crate::macros::Peripheral::Mouse);
+        assert_eq!(saved.name, "Nova aba");
+        assert_eq!(
+            saved.steps,
+            vec![
+                crate::macros::Step::Shortcut("Ctrl+T".into()),
+                crate::macros::Step::Delay(250)
+            ]
+        );
+        let json = serde_json::to_string(&app.config).unwrap();
+        let restored: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.macros.bindings[0].steps, saved.steps);
+        assert!(app.macro_worker.is_none());
+        click_text(&mut app, &ctx, "Remover macro");
+        assert!(app.config.macros.bindings.is_empty());
     }
 
     #[test]

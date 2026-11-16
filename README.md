@@ -34,6 +34,29 @@ ativa o efeito estático. O interruptor de iluminação preserva o último efeit
 última alteração de iluminação, exceto enquanto um campo de texto está em uso.
 Os sliders também aceitam as setas do teclado quando recebem foco.
 
+## Macros de teclado e mouse
+
+Na galeria, abra **Macros** e selecione **G213 Prodigy** ou **G203**. Escolha
+uma tecla de função (F1–F12) no G213 ou um dos botões **Voltar**, **Avançar** e
+**Clique da roda** no G203. Nomeie a macro, adicione atalhos como `Ctrl+Shift+T`
+e pausas de 10 a 5000 ms, organize a sequência e clique em **Salvar macro**.
+Cada gatilho aceita uma sequência de até 24 etapas. Você pode editar ou remover
+a sequência ao selecionar o mesmo gatilho novamente.
+
+Para executar macros, instale a regra opcional e reconecte os dispositivos:
+
+```sh
+./install.sh --with-macros
+```
+
+A regra concede acesso à sessão local ativa para ler as entradas dos modelos
+compatíveis e emitir atalhos via `/dev/uinput`. O app roda como usuário comum e
+só monitora os gatilhos configurados quando **Executar macros** está ligado.
+A macro é executada no aplicativo em foco ao soltar o gatilho, além da ação
+original da tecla ou botão. As macros são salvas localmente e o app precisa
+estar aberto para executá-las. Para restaurar a execução após login, use
+**Ajustes → Iniciar com o sistema**.
+
 ## Escopo e referência
 
 | Dispositivo USB | Identificador | Controles |
@@ -198,9 +221,7 @@ O G213 expõe uma interface HID vendor-specific (usage page `0xFF43`, report ID
 `0x11`) com relatórios de saída de 20 bytes. A implementação segue o protocolo
 registrado no [controlador G213 do OpenRGB](https://github.com/CalcProgrammer1/OpenRGB/tree/master/Controllers/LogitechController/LogitechG213Controller).
 
-A organização visual e a paleta tomam o [OpenLogi](https://github.com/AprilNEA/OpenLogi)
-como referência. Não são redistribuídos seu nome como marca do aplicativo,
-logotipo ou ícone.
+A galeria, as abas e o editor com imagem do dispositivo seguem a [interface do OpenLogi](https://openlogi.org/). A implementação usa o código e a identidade visual deste projeto.
 
 Código sob MIT. Inter usa a SIL Open Font License 1.1 (veja
 `assets/fonts/LICENSE-Inter.txt`) e Phosphor usa MIT. A fotografia e as marcas
