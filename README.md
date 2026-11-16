@@ -73,8 +73,11 @@ Use **Iluminação dos dispositivos** na galeria para ligar ou desligar teclado
 e mouse juntos. Se apenas um estiver aceso, o primeiro clique acende os dois.
 Os controles individuais ficam nas telas do teclado e do mouse.
 
-Com **Sincronizar cores**, os dois dispositivos recebem a mesma cor estática,
-brilho e matiz. As configurações individuais voltam ao desativar a sincronização.
+Em **Sincronizar cores**, escolha **Cor compartilhada** para usar a mesma
+cor estática, brilho e matiz nos dois dispositivos. O painel mostra a prévia
+e o estado de conexão do G213 e do G203. Clique em **Aplicar** para salvar
+e enviar as mudanças. Para recuperar as cores e os efeitos anteriores,
+selecione **Cores individuais** e aplique.
 O brilho escala a cor até o máximo disponível no hardware. A matiz gira o tom
 da cor base e está disponível no G213 em estático e respiração.
 

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 mod macro_editor;
 mod peripherals;
 mod profiles;
+mod sync_ui;
 
 const DEVICE_NAME: &str = "Logitech G213 Prodigy";
 
@@ -94,7 +95,7 @@ pub struct G213App {
     worker: Option<DeviceWorker>,
     mouse_worker: Option<DeviceWorker>,
     mouse_image: crate::product::ProductImage,
-    peripheral_dialog: Option<bool>,
+    peripheral_dialog: Option<sync_ui::PeripheralDialog>,
     autostart: bool,
     autostart_error: Option<String>,
     applied: (ApplyState, ApplyState),
@@ -1730,15 +1731,74 @@ mod tests {
         assert_eq!(app.applied.0.effect, Effect::Breathing);
         assert_eq!(app.applied.1.color, Rgb::WHITE);
 
+        app.config.sync_colors = true;
+        app.touch();
+        for enabled in [false, true] {
+            click_text(&mut app, &ctx, "Iluminação dos dispositivos");
+            assert_eq!(
+                (app.applied.0.enabled, app.applied.1.enabled),
+                (enabled, enabled)
+            );
+        }
+    }
+
+    #[test]
+    fn sync_preview_requires_apply_and_restores_individual_colors() {
+        let ctx = egui::Context::default();
+        let mut app = G213App::with_context(&ctx, true);
+        app.config.mouse.color = Rgb::WHITE;
+        app.config.lighting.color = Rgb::new(90, 40, 120);
+        app.touch();
+
         click_text(&mut app, &ctx, "Sincronizar cores");
-        click_text(&mut app, &ctx, "Iluminação do teclado e do mouse");
-        assert!(!app.applied.0.enabled && !app.applied.1.enabled);
-        click_text(&mut app, &ctx, "Sincronização");
-        assert!(!app.applied.0.enabled && !app.applied.1.enabled);
-        click_text(&mut app, &ctx, "Iluminação do teclado e do mouse");
-        assert!(app.applied.0.enabled && app.applied.1.enabled);
-        click_text(&mut app, &ctx, "Sincronização");
-        assert!(app.applied.0.enabled && app.applied.1.enabled);
+        click_text(&mut app, &ctx, "Cor compartilhada");
+        assert!(!app.config.sync_colors);
+        assert_ne!(app.applied.0.color, app.applied.1.color);
+        click_text(&mut app, &ctx, "Cancelar");
+        assert!(!app.config.sync_colors);
+        assert!(app.peripheral_dialog.is_none());
+
+        click_text(&mut app, &ctx, "Sincronizar cores");
+        click_text(&mut app, &ctx, "Cor compartilhada");
+        click_text(&mut app, &ctx, "#3B82F6");
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        ctrl: true,
+                        command: true,
+                        ..Default::default()
+                    },
+                },
+                egui::Event::Text("x".into()),
+            ],
+        );
+        click_text(&mut app, &ctx, "Aplicar");
+        assert!(
+            !app.config.sync_colors,
+            "an invalid hex value must not be applied"
+        );
+        assert!(app.peripheral_dialog.is_some());
+        click_text(&mut app, &ctx, "Cancelar");
+
+        click_text(&mut app, &ctx, "Sincronizar cores");
+        click_text(&mut app, &ctx, "Cor compartilhada");
+        click_text(&mut app, &ctx, "Aplicar");
+        assert!(app.config.sync_colors);
+        assert_eq!(app.applied.0.color, app.applied.1.color);
+
+        click_text(&mut app, &ctx, "Cores sincronizadas");
+        click_text(&mut app, &ctx, "Cores individuais");
+        click_text(&mut app, &ctx, "Aplicar");
+        assert!(!app.config.sync_colors);
+        assert_eq!(app.applied.0.color, Rgb::new(90, 40, 120));
+        assert_eq!(app.applied.1.color, Rgb::WHITE);
     }
 
     #[test]

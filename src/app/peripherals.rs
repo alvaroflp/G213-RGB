@@ -1,5 +1,6 @@
 //! Device discovery and shared lighting controls.
 
+use super::sync_ui::PeripheralDialog;
 use super::*;
 use crate::config::SolidLight;
 
@@ -22,11 +23,15 @@ impl G213App {
                 &pal,
                 self.sync_label(),
                 Some(egui_phosphor::regular::LINK),
-                ButtonKind::Secondary,
+                if self.config.sync_colors {
+                    ButtonKind::Primary
+                } else {
+                    ButtonKind::Secondary
+                },
             )
             .clicked()
             {
-                self.peripheral_dialog = Some(true);
+                self.open_sync();
             }
             if widgets::button(ui, &pal, "Macros", None, ButtonKind::Secondary).clicked() {
                 self.open_macros(crate::macros::Peripheral::Keyboard);
@@ -53,7 +58,7 @@ impl G213App {
 
     fn sync_label(&self) -> &'static str {
         if self.config.sync_colors {
-            "Sincronização ativa"
+            "Cores sincronizadas"
         } else {
             "Sincronizar cores"
         }
@@ -105,7 +110,11 @@ impl G213App {
                 if widgets::button(ui, &pal, "Personalizar mouse", None, ButtonKind::Primary)
                     .clicked()
                 {
-                    self.peripheral_dialog = Some(self.config.sync_colors);
+                    if self.config.sync_colors {
+                        self.open_sync();
+                    } else {
+                        self.peripheral_dialog = Some(PeripheralDialog::Mouse);
+                    }
                 }
                 if widgets::button(ui, &pal, "Macros do mouse", None, ButtonKind::Secondary)
                     .clicked()
@@ -128,61 +137,35 @@ impl G213App {
             )
             .clicked()
             {
-                self.peripheral_dialog = Some(true);
+                self.open_sync();
             }
         });
     }
 
     pub(super) fn peripherals_modal(&mut self, ctx: &egui::Context, pal: Palette) {
-        let Some(shared) = self.peripheral_dialog else {
+        let Some(dialog) = self.peripheral_dialog.take() else {
             return;
         };
-        let mut open = true;
-        let response = egui::Modal::new(Id::new("peripheral-lighting"))
+        if let PeripheralDialog::Sync(draft) = dialog {
+            self.sync_modal(ctx, pal, draft);
+            return;
+        }
+
+        let response = egui::Modal::new(Id::new("mouse-lighting"))
             .frame(modal_frame(&pal))
             .show(ctx, |ui| {
                 ui.set_width(390.0);
-                ui.heading(if shared {
-                    "Sincronizar cores"
-                } else {
-                    "Iluminação do G203"
-                });
-                if shared {
-                    self.global_power_ui(ui, pal, "Iluminação do teclado e do mouse");
-                    ui.label("A mesma cor estática, brilho e matiz no teclado e no mouse.");
-                    let active = widgets::toggle_row(
-                        ui,
-                        &pal,
-                        "Sincronização",
-                        "Usar a iluminação compartilhada nos dois dispositivos.",
-                        self.config.sync_colors,
-                    );
-                    if active != self.config.sync_colors {
-                        self.config.sync_colors = active;
-                        self.touch();
-                    }
-                }
-                let mut light = if shared {
-                    self.config.shared
-                } else {
-                    self.config.mouse
-                };
-                let original = light;
-                solid_controls(ui, pal, &mut light, shared);
-                if light != original {
-                    if shared {
-                        self.config.shared = light;
-                    } else {
-                        self.config.mouse = light;
-                    }
+                ui.heading("Iluminação do G203");
+                let mut light = self.config.mouse;
+                solid_controls(ui, &pal, &mut light);
+                if light != self.config.mouse {
+                    self.config.mouse = light;
                     self.touch();
                 }
-                if widgets::button(ui, &pal, "Fechar", None, ButtonKind::Secondary).clicked() {
-                    open = false;
-                }
+                widgets::button(ui, &pal, "Fechar", None, ButtonKind::Secondary).clicked()
             });
-        if !open || response.should_close() {
-            self.peripheral_dialog = None;
+        if !response.inner && !response.should_close() {
+            self.peripheral_dialog = Some(PeripheralDialog::Mouse);
         }
     }
 
@@ -214,17 +197,15 @@ impl G213App {
     }
 }
 
-fn solid_controls(ui: &mut Ui, pal: Palette, light: &mut SolidLight, shared: bool) {
-    widgets::divider(ui, &pal);
-    if !shared {
-        light.enabled = widgets::toggle_row(
-            ui,
-            &pal,
-            "Iluminação do mouse",
-            "Controla os LEDs do G203.",
-            light.enabled,
-        );
-    }
+fn solid_controls(ui: &mut Ui, pal: &Palette, light: &mut SolidLight) {
+    widgets::divider(ui, pal);
+    light.enabled = widgets::toggle_row(
+        ui,
+        pal,
+        "Iluminação do mouse",
+        "Controla os LEDs do G203.",
+        light.enabled,
+    );
     ui.horizontal(|ui| {
         let mut rgb = [light.color.r, light.color.g, light.color.b];
         if ui.color_edit_button_srgb(&mut rgb).changed() {
@@ -232,7 +213,7 @@ fn solid_controls(ui: &mut Ui, pal: Palette, light: &mut SolidLight, shared: boo
         }
         ui.label(format!("Cor base · {}", light.color.hex()));
     });
-    widgets::slider_row(ui, &pal, "Brilho", &mut light.brightness, 1..=100);
+    widgets::slider_row(ui, pal, "Brilho", &mut light.brightness, 1..=100);
     ui.add(
         egui::Slider::new(&mut light.hue, 0..=359)
             .suffix("°")
