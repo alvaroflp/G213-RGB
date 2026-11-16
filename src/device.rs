@@ -30,8 +30,8 @@ pub const CONTROL_USAGE_PAGE: u16 = 0xff43;
 pub const REPORT_ID: u8 = 0x11;
 pub const PACKET_LEN: usize = 20;
 
-/// How long we wait for the keyboard's acknowledgement before moving on.
-const ACK_TIMEOUT_MS: i32 = 20;
+/// Maximum wait for a matching HID++ acknowledgement on the worker thread.
+const ACK_TIMEOUT: Duration = Duration::from_millis(100);
 /// How often an unavailable keyboard is probed again.
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(1500);
 
@@ -195,28 +195,41 @@ impl Model {
         if self == Self::G213 {
             return device.apply(state);
         }
-        let color = if state.enabled {
+        let enabled = state.enabled && state.effect != Effect::Off;
+        let color = if enabled {
             state.render_color(state.color)
         } else {
             Rgb::BLACK
         };
-        for packet in self.mouse_packets(color) {
-            device.send(&packet)?;
-        }
-        Ok(())
+        device.send(&self.mouse_packet(color, enabled))
     }
 
-    fn mouse_packets(self, color: Rgb) -> Vec<[u8; PACKET_LEN]> {
+    fn mouse_packet(self, color: Rgb, enabled: bool) -> [u8; PACKET_LEN] {
         let Rgb { r, g, b } = color;
         match self {
-            Self::G203Prodigy => vec![packet(&[0x11, 0xff, 0x0e, 0x3a, 0, 1, r, g, b, 2])],
-            Self::G203Lightsync => vec![
-                packet(&[
-                    0x11, 0xff, 0x12, 0x10, 1, r, g, b, 2, r, g, b, 3, r, g, b, 0xff,
-                ]),
-                packet(&[0x11, 0xff, 0x12, 0x70]),
-            ],
-            Self::G213 => unreachable!("mouse packets requested for G213"),
+            Self::G203Prodigy => packet(&[0x11, 0xff, 0x0e, 0x3a, 0, 1, r, g, b, 2]),
+            // Use the native whole-device effect. Direct writes to the three zones
+            // have a documented one-update lag in OpenRGB's LIGHTSYNC controller.
+            Self::G203Lightsync => packet(&[
+                0x11,
+                0xff,
+                0x0e,
+                0x10,
+                0,
+                u8::from(enabled),
+                r,
+                g,
+                b,
+                if enabled { 2 } else { 0 },
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+            ]),
+            Self::G213 => unreachable!("mouse packet requested for G213"),
         }
     }
 }
@@ -377,10 +390,7 @@ impl G213 {
             Effect::Static => match state.layout {
                 Layout::Uniform => {
                     let color = state.render_color(state.color);
-                    for zone in 1..=5u8 {
-                        self.set_direct(zone, color)?;
-                    }
-                    Ok(())
+                    self.set_mode(Effect::Static.protocol_mode(), color, state.speed, 0x01)
                 }
                 Layout::Zones => {
                     for (index, color) in state.zones.iter().enumerate() {
@@ -427,23 +437,81 @@ impl G213 {
             ));
         }
 
-        // OpenRGB blocks on hid_read() here. Poll first so a silent device can
-        // never freeze the UI thread; the acknowledgement itself carries no
-        // useful data.
+        // The control interface can also produce input reports. Wait for
+        // this command's response so keyboard input or a HID++ error
+        // cannot be mistaken for successful lighting.
+        let deadline = Instant::now() + ACK_TIMEOUT;
         let mut poll_fd = libc::pollfd {
             fd: self.fd,
             events: libc::POLLIN,
             revents: 0,
         };
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, ACK_TIMEOUT_MS) };
-        if ready > 0 && poll_fd.revents & libc::POLLIN != 0 {
-            let mut ack = [0u8; PACKET_LEN];
-            unsafe {
-                libc::read(self.fd, ack.as_mut_ptr().cast::<libc::c_void>(), PACKET_LEN);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // SAFETY: poll_fd describes one live descriptor owned by self.
+            let ready = unsafe { libc::poll(&mut poll_fd, 1, remaining.as_millis() as i32 + 1) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                break;
+            }
+            if poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "dispositivo HID desconectado",
+                ));
+            }
+            let mut reply = [0u8; 64];
+            // SAFETY: reply is writable for all 64 bytes.
+            let count = unsafe { libc::read(self.fd, reply.as_mut_ptr().cast(), reply.len()) };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if let Some(result) = hidpp_response(packet, &reply[..count as usize]) {
+                return result;
             }
         }
-        Ok(())
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "sem confirmação HID++ da iluminação",
+        ))
     }
+}
+
+/// HID++ 1.0 (short/0x8f) and 2.0 (long/0xff) errors carry the
+/// original feature and function one byte later than a normal reply.
+fn hidpp_response(request: &[u8], reply: &[u8]) -> Option<io::Result<()>> {
+    let [report, address, feature, function, rest @ ..] = reply else {
+        return None;
+    };
+    if !matches!(report, 0x10..=0x12) || *address != request[1] {
+        return None;
+    }
+    if matches!((*report, *feature), (0x10, 0x8f) | (0x11 | 0x12, 0xff))
+        && *function == request[2]
+        && let [original_function, code, ..] = rest
+        && *original_function == request[3]
+    {
+        return Some(Err(io::Error::other(format!(
+            "comando de iluminação recusado (HID++ 0x{code:02X})"
+        ))));
+    }
+    (*feature == request[2] && *function == request[3]).then_some(Ok(()))
 }
 
 impl Drop for G213 {
@@ -821,22 +889,79 @@ mod tests {
         let prodigy = Model::from_uevent("HID_ID=0003:0000046D:0000C084").unwrap();
         let lightsync = Model::from_uevent("HID_ID=0003:0000046D:0000C09D").unwrap();
         let color = Rgb::new(17, 34, 51);
-        let prodigy_packets = prodigy.mouse_packets(color);
         assert_eq!(
-            &prodigy_packets[0][..10],
+            &prodigy.mouse_packet(color, true)[..10],
             &[0x11, 0xff, 0x0e, 0x3a, 0, 1, 17, 34, 51, 2]
         );
-        let lightsync_packets = lightsync.mouse_packets(color);
         assert_eq!(
-            &lightsync_packets[0][..17],
-            &[
-                0x11, 0xff, 0x12, 0x10, 1, 17, 34, 51, 2, 17, 34, 51, 3, 17, 34, 51, 0xff
+            lightsync.mouse_packet(color, true),
+            [
+                0x11, 0xff, 0x0e, 0x10, 0, 1, 17, 34, 51, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
             ]
         );
-        assert_eq!(&lightsync_packets[1][..4], &[0x11, 0xff, 0x12, 0x70]);
+        assert_eq!(lightsync.mouse_packet(Rgb::BLACK, false)[5], 0);
         assert!(lightsync.matches_descriptor(&[0x06, 0, 0xff, 9, 2, 0xa1, 1, 0x85, 0x11]));
         assert!(!lightsync.matches_descriptor(&[0x06, 0, 0xff, 9, 1, 0xa1, 1, 0x85, 0x11]));
         assert_eq!(Model::from_uevent("HID_ID=0005:0000046D:0000C092"), None);
+    }
+
+    #[test]
+    fn shared_rgb_reaches_both_device_protocols() {
+        use std::os::{fd::OwnedFd, unix::net::UnixDatagram};
+        let mut config = crate::config::Config {
+            sync_colors: true,
+            ..Default::default()
+        };
+        config.shared.color = Rgb::new(255, 0, 0);
+        config.shared.hue = 120;
+        config.shared.brightness = 50;
+        for (model, state, expected) in [
+            (
+                Model::G213,
+                ApplyState::from(&config),
+                [0x11, 0xff, 0x0c, 0x3c, 0, 1, 0, 128, 0],
+            ),
+            (
+                Model::G203Lightsync,
+                ApplyState::from(&config.mouse_lighting()),
+                [0x11, 0xff, 0x0e, 0x10, 0, 1, 0, 128, 0],
+            ),
+        ] {
+            let (socket, peer) = UnixDatagram::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let file = fs::File::from(OwnedFd::from(socket));
+            let device = G213 {
+                fd: file.as_raw_fd(),
+                file,
+            };
+            let responder = thread::spawn(move || {
+                let mut request = [0; PACKET_LEN];
+                assert_eq!(peer.recv(&mut request).unwrap(), PACKET_LEN);
+                assert_eq!(request[..9], expected);
+                // A keyboard input report may arrive before the command reply.
+                peer.send(&[0x01, 0x00, 0x00, 0x00]).unwrap();
+                let reply = packet(&request[..4]);
+                peer.send(&reply).unwrap();
+                // Keep the peer alive until the reader has consumed the datagrams.
+                peer
+            });
+            model.apply(&device, &state).unwrap();
+            responder.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn hidpp_errors_are_not_acknowledgements() {
+        let request = [0x11, 0xff, 0x0e, 0x10];
+        let reply = [0x11, 0xff, 0xff, 0x0e, 0x10, 0x05];
+        assert!(
+            hidpp_response(&request, &reply)
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("0x05")
+        );
+        assert!(hidpp_response(&request, &[0x11, 0xff, 0x0e, 0x50]).is_none());
     }
 
     #[test]

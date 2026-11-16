@@ -211,6 +211,10 @@ impl G213App {
     /// Record an edit: push it to the keyboard immediately and schedule a
     /// debounced save.
     fn touch(&mut self) {
+        self.commit_edit(false);
+    }
+
+    fn commit_edit(&mut self, reapply_both: bool) {
         self.config.sanitize();
         self.dirty = true;
         self.last_edit = Some(Instant::now());
@@ -222,13 +226,13 @@ impl G213App {
         }
         let keyboard = ApplyState::from(&self.config);
         let mouse = ApplyState::from(&self.config.mouse_lighting());
-        if keyboard != self.applied.0 {
+        if reapply_both || keyboard != self.applied.0 {
             if let Some(worker) = &self.worker {
                 worker.apply(keyboard.clone());
             }
             self.applied.0 = keyboard;
         }
-        if mouse != self.applied.1 {
+        if reapply_both || mouse != self.applied.1 {
             if let Some(worker) = &self.mouse_worker {
                 worker.apply(mouse.clone());
             }

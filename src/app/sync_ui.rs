@@ -89,10 +89,10 @@ impl G213App {
                 } else {
                     self.config.shared
                 };
-                if self.config.sync_colors != draft.linked || self.config.shared != shared {
+                if draft.linked || self.config.sync_colors != draft.linked {
                     self.config.sync_colors = draft.linked;
                     self.config.shared = shared;
-                    self.touch();
+                    self.commit_edit(draft.linked);
                     self.notify(if draft.linked {
                         "Cor compartilhada salva"
                     } else {
