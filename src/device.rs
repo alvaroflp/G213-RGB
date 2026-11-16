@@ -85,18 +85,28 @@ impl DeviceStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundDevice {
+    pub model: Model,
     pub path: PathBuf,
     pub name: String,
 }
 
+impl FoundDevice {
+    pub fn open(&self) -> io::Result<G213> {
+        let handle = G213::open(&self.path)?;
+        self.model.initialize(&handle)?;
+        Ok(handle)
+    }
+}
+
 /// Everything the device needs in order to render the current lighting.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplyState {
     pub enabled: bool,
     pub layout: Layout,
     pub color: Rgb,
     pub zones: [Rgb; 5],
     pub brightness: u8,
+    pub hue: u16,
     pub effect: Effect,
     pub effect_color: Rgb,
     pub speed: u8,
@@ -105,18 +115,116 @@ pub struct ApplyState {
 
 impl From<&crate::config::Config> for ApplyState {
     fn from(config: &crate::config::Config) -> Self {
+        Self::from(&config.keyboard_lighting())
+    }
+}
+
+impl From<&crate::config::Lighting> for ApplyState {
+    fn from(settings: &crate::config::Lighting) -> Self {
         Self {
-            enabled: config.lighting.enabled,
-            layout: config.lighting.layout,
-            color: config.lighting.color,
-            zones: config.lighting.zones,
-            brightness: config.lighting.brightness,
-            effect: config.lighting.effect,
-            effect_color: config.lighting.effect_color,
-            speed: config.lighting.speed,
-            direction: config.lighting.direction,
+            enabled: settings.enabled,
+            layout: settings.layout,
+            color: settings.color,
+            zones: settings.zones,
+            brightness: settings.brightness,
+            hue: settings.hue,
+            effect: settings.effect,
+            effect_color: settings.effect_color,
+            speed: settings.speed,
+            direction: settings.direction,
         }
     }
+}
+
+impl ApplyState {
+    fn render_color(&self, color: Rgb) -> Rgb {
+        color.with_hue(self.hue).scaled(self.brightness)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Model {
+    G213,
+    G203Prodigy,
+    G203Lightsync,
+}
+
+impl Model {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::G213 => "Logitech G213 Prodigy",
+            Self::G203Prodigy => "Logitech G203 Prodigy",
+            Self::G203Lightsync => "Logitech G203 LIGHTSYNC",
+        }
+    }
+
+    fn from_uevent(uevent: &str) -> Option<Self> {
+        let id = uevent_value(uevent, "HID_ID")?;
+        let mut parts = id.split(':').map(|part| u16::from_str_radix(part, 16).ok());
+        if parts.next()? != Some(3) || parts.next()? != Some(VENDOR_ID) {
+            return None;
+        }
+        match parts.next()?? {
+            PRODUCT_ID => Some(Self::G213),
+            0xc084 => Some(Self::G203Prodigy),
+            0xc092 | 0xc09d => Some(Self::G203Lightsync),
+            _ => None,
+        }
+    }
+
+    fn matches_descriptor(self, descriptor: &[u8]) -> bool {
+        if self == Self::G213 {
+            return is_control_interface(descriptor);
+        }
+        descriptor.windows(7).any(|item| {
+            item == [0x06, 0x00, 0xff, 0x09, 0x02, 0xa1, 0x01]
+                || (self == Self::G203Prodigy && item == [0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01])
+        }) && descriptor.windows(2).any(|item| item == [0x85, REPORT_ID])
+    }
+
+    fn initialize(self, device: &G213) -> io::Result<()> {
+        match self {
+            Self::G213 => Ok(()),
+            // OpenRGB's direct mode disables repeated flash writes.
+            Self::G203Prodigy => device.send(&[0x10, 0xff, 0x0e, 0x8a, 1, 1, 0]),
+            Self::G203Lightsync => device.send(&packet(&[0x11, 0xff, 0x0e, 0x50, 1, 3, 7])),
+        }
+    }
+
+    pub fn apply(self, device: &G213, state: &ApplyState) -> io::Result<()> {
+        if self == Self::G213 {
+            return device.apply(state);
+        }
+        let color = if state.enabled {
+            state.render_color(state.color)
+        } else {
+            Rgb::BLACK
+        };
+        for packet in self.mouse_packets(color) {
+            device.send(&packet)?;
+        }
+        Ok(())
+    }
+
+    fn mouse_packets(self, color: Rgb) -> Vec<[u8; PACKET_LEN]> {
+        let Rgb { r, g, b } = color;
+        match self {
+            Self::G203Prodigy => vec![packet(&[0x11, 0xff, 0x0e, 0x3a, 0, 1, r, g, b, 2])],
+            Self::G203Lightsync => vec![
+                packet(&[
+                    0x11, 0xff, 0x12, 0x10, 1, r, g, b, 2, r, g, b, 3, r, g, b, 0xff,
+                ]),
+                packet(&[0x11, 0xff, 0x12, 0x70]),
+            ],
+            Self::G213 => unreachable!("mouse packets requested for G213"),
+        }
+    }
+}
+
+fn packet(bytes: &[u8]) -> [u8; PACKET_LEN] {
+    let mut packet = [0; PACKET_LEN];
+    packet[..bytes.len()].copy_from_slice(bytes);
+    packet
 }
 
 /// Locate the G213 control interface.
@@ -125,12 +233,21 @@ impl From<&crate::config::Config> for ApplyState {
 /// USB IDs, so the report descriptor is what tells them apart: the control
 /// interface declares usage page `0xFF43` and report ID `0x11`.
 pub fn discover() -> Option<FoundDevice> {
-    if let Ok(override_path) = std::env::var("G213_HIDRAW")
+    discover_matching(false)
+}
+
+pub fn discover_matching(mouse: bool) -> Option<FoundDevice> {
+    if !mouse
+        && let Ok(override_path) = std::env::var("G213_HIDRAW")
         && !override_path.is_empty()
     {
         let path = PathBuf::from(override_path);
         let name = read_hid_name(&path).unwrap_or_else(|| "Logitech G213 Prodigy".to_string());
-        return Some(FoundDevice { path, name });
+        return Some(FoundDevice {
+            model: Model::G213,
+            path,
+            name,
+        });
     }
 
     let mut entries: Vec<PathBuf> = fs::read_dir("/sys/class/hidraw")
@@ -150,37 +267,37 @@ pub fn discover() -> Option<FoundDevice> {
             Ok(text) => text,
             Err(_) => continue,
         };
-        if !is_g213(&uevent) {
+        let Some(model) = Model::from_uevent(&uevent) else {
+            continue;
+        };
+        if mouse == (model == Model::G213) {
+            continue;
+        }
+        if mouse
+            && entry
+                .join("device")
+                .canonicalize()
+                .ok()
+                .and_then(|path| fs::read_to_string(path.parent()?.join("bInterfaceNumber")).ok())
+                .is_none_or(|value| value.trim() != "01")
+        {
             continue;
         }
         let descriptor = fs::read(entry.join("device/report_descriptor")).unwrap_or_default();
-        if !is_control_interface(&descriptor) {
+        if !model.matches_descriptor(&descriptor) {
             continue;
         }
         let Some(hidraw) = entry.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let name = uevent_value(&uevent, "HID_NAME")
-            .unwrap_or_else(|| "Logitech G213 Prodigy".to_string());
+        let name = uevent_value(&uevent, "HID_NAME").unwrap_or_else(|| model.name().to_string());
         return Some(FoundDevice {
+            model,
             path: PathBuf::from("/dev").join(hidraw),
             name,
         });
     }
     None
-}
-
-fn is_g213(uevent: &str) -> bool {
-    let Some(id) = uevent_value(uevent, "HID_ID") else {
-        return false;
-    };
-    let mut parts = id.split(':');
-    let (_bus, vendor, product) = match (parts.next(), parts.next(), parts.next()) {
-        (Some(bus), Some(vendor), Some(product)) => (bus, vendor, product),
-        _ => return false,
-    };
-    let parse = |text: &str| u32::from_str_radix(text, 16).ok();
-    parse(vendor) == Some(u32::from(VENDOR_ID)) && parse(product) == Some(u32::from(PRODUCT_ID))
 }
 
 fn uevent_value(uevent: &str, key: &str) -> Option<String> {
@@ -259,7 +376,7 @@ impl G213 {
             Effect::Off => unreachable!("handled above"),
             Effect::Static => match state.layout {
                 Layout::Uniform => {
-                    let color = state.color.scaled(state.brightness);
+                    let color = state.render_color(state.color);
                     for zone in 1..=5u8 {
                         self.set_direct(zone, color)?;
                     }
@@ -267,13 +384,13 @@ impl G213 {
                 }
                 Layout::Zones => {
                     for (index, color) in state.zones.iter().enumerate() {
-                        self.set_direct(index as u8 + 1, color.scaled(state.brightness))?;
+                        self.set_direct(index as u8 + 1, state.render_color(*color))?;
                     }
                     Ok(())
                 }
             },
             effect => {
-                let color = state.effect_color.scaled(state.brightness);
+                let color = state.render_color(state.effect_color);
                 self.set_mode(
                     effect.protocol_mode(),
                     color,
@@ -292,13 +409,18 @@ impl G213 {
         self.send(&build_mode_packet(mode, color, speed, direction))
     }
 
-    fn send(&self, packet: &[u8; PACKET_LEN]) -> io::Result<()> {
-        let written =
-            unsafe { libc::write(self.fd, packet.as_ptr().cast::<libc::c_void>(), PACKET_LEN) };
+    fn send(&self, packet: &[u8]) -> io::Result<()> {
+        let written = unsafe {
+            libc::write(
+                self.fd,
+                packet.as_ptr().cast::<libc::c_void>(),
+                packet.len(),
+            )
+        };
         if written < 0 {
             return Err(io::Error::last_os_error());
         }
-        if written as usize != PACKET_LEN {
+        if written as usize != packet.len() {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "gravação parcial no dispositivo HID",
@@ -406,12 +528,16 @@ pub struct DeviceWorker {
 
 impl DeviceWorker {
     pub fn start() -> Self {
+        Self::for_mouse(false)
+    }
+
+    pub fn for_mouse(mouse: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(DeviceStatus::searching()));
         let worker_status = Arc::clone(&status);
         let _ = thread::Builder::new()
             .name("g213-device".to_string())
-            .spawn(move || worker_loop(rx, worker_status));
+            .spawn(move || worker_loop(rx, worker_status, mouse));
         Self { tx, status }
     }
 
@@ -431,7 +557,7 @@ impl DeviceWorker {
     }
 }
 
-fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
+fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>, mouse: bool) {
     let mut found: Option<FoundDevice> = None;
     let mut device: Option<G213> = None;
     let mut wanted: Option<ApplyState> = None;
@@ -439,7 +565,7 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
     let mut next_scan = Instant::now();
 
     while Instant::now() >= next_scan && device.is_none() {
-        try_connect(&mut found, &mut device, &status);
+        try_connect(&mut found, &mut device, &status, mouse);
         next_scan = Instant::now() + RECONNECT_INTERVAL;
     }
 
@@ -488,15 +614,18 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>) {
         }
 
         if device.is_none() && Instant::now() >= next_scan {
-            try_connect(&mut found, &mut device, &status);
+            try_connect(&mut found, &mut device, &status, mouse);
             next_scan = Instant::now() + RECONNECT_INTERVAL;
             if device.is_some() {
                 need_apply = true;
             }
         }
 
-        if need_apply && let (Some(dev), Some(state)) = (device.as_ref(), wanted.as_ref()) {
-            match dev.apply(state) {
+        if need_apply
+            && let (Some(dev), Some(state), Some(info)) =
+                (device.as_ref(), wanted.as_ref(), found.as_ref())
+        {
+            match info.model.apply(dev, state) {
                 Ok(()) => {
                     need_apply = false;
                     if let Some(found) = found.as_ref() {
@@ -532,9 +661,10 @@ fn try_connect(
     found: &mut Option<FoundDevice>,
     device: &mut Option<G213>,
     status: &Arc<Mutex<DeviceStatus>>,
+    mouse: bool,
 ) {
     if found.is_none() {
-        *found = discover();
+        *found = discover_matching(mouse);
     }
     let Some(info) = found.as_ref().cloned() else {
         set_status(
@@ -549,7 +679,7 @@ fn try_connect(
         return;
     };
 
-    match G213::open(&info.path) {
+    match info.open() {
         Ok(handle) => {
             set_status(
                 status,
@@ -687,6 +817,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn supported_mouse_variants_use_their_own_lighting_protocol() {
+        let prodigy = Model::from_uevent("HID_ID=0003:0000046D:0000C084").unwrap();
+        let lightsync = Model::from_uevent("HID_ID=0003:0000046D:0000C09D").unwrap();
+        let color = Rgb::new(17, 34, 51);
+        let prodigy_packets = prodigy.mouse_packets(color);
+        assert_eq!(
+            &prodigy_packets[0][..10],
+            &[0x11, 0xff, 0x0e, 0x3a, 0, 1, 17, 34, 51, 2]
+        );
+        let lightsync_packets = lightsync.mouse_packets(color);
+        assert_eq!(
+            &lightsync_packets[0][..17],
+            &[
+                0x11, 0xff, 0x12, 0x10, 1, 17, 34, 51, 2, 17, 34, 51, 3, 17, 34, 51, 0xff
+            ]
+        );
+        assert_eq!(&lightsync_packets[1][..4], &[0x11, 0xff, 0x12, 0x70]);
+        assert!(lightsync.matches_descriptor(&[0x06, 0, 0xff, 9, 2, 0xa1, 1, 0x85, 0x11]));
+        assert!(!lightsync.matches_descriptor(&[0x06, 0, 0xff, 9, 1, 0xa1, 1, 0x85, 0x11]));
+        assert_eq!(Model::from_uevent("HID_ID=0005:0000046D:0000C092"), None);
+    }
+
+    #[test]
     fn idle_disconnect_is_detected_without_writing() {
         use std::os::fd::OwnedFd;
         let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -752,11 +905,11 @@ mod tests {
     #[test]
     fn uevent_parsing_is_case_insensitive_for_ids() {
         let uevent = "DRIVER=hid-generic\nHID_ID=0003:0000046D:0000C336\nHID_NAME=Logitech Gaming Keyboard G213\n";
-        assert!(is_g213(uevent));
+        assert_eq!(Model::from_uevent(uevent), Some(Model::G213));
         assert_eq!(
             uevent_value(uevent, "HID_NAME").as_deref(),
             Some("Logitech Gaming Keyboard G213")
         );
-        assert!(!is_g213("HID_ID=0003:0000046D:0000C335\n"));
+        assert_eq!(Model::from_uevent("HID_ID=0003:0000046D:0000C335\n"), None);
     }
 }

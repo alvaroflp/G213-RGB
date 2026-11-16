@@ -58,6 +58,18 @@ impl Rgb {
         Self::new(scale(self.r), scale(self.g), scale(self.b))
     }
 
+    /// Shift hue in sRGB while preserving saturation and value.
+    pub fn with_hue(self, degrees: u16) -> Self {
+        if degrees.is_multiple_of(360) {
+            return self;
+        }
+        let mut hsv =
+            egui::ecolor::Hsva::from_rgb([self.r, self.g, self.b].map(|c| f32::from(c) / 255.0));
+        hsv.h = (hsv.h + f32::from(degrees) / 360.0).fract();
+        let [r, g, b] = hsv.to_rgb().map(|c| (c * 255.0).round() as u8);
+        Self::new(r, g, b)
+    }
+
     /// Linear blend, `t = 0` returns `self`.
     pub fn lerp(self, other: Self, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
@@ -211,6 +223,7 @@ pub struct Lighting {
     pub zones: [Rgb; ZONE_COUNT],
     /// 1..=100. Applied in software by scaling every colour we send.
     pub brightness: u8,
+    pub hue: u16,
     pub effect: Effect,
     pub effect_color: Rgb,
     /// 1..=100, where 100 is the fastest. Mapped onto the device's 10..=200.
@@ -232,6 +245,7 @@ impl Default for Lighting {
                 Rgb::new(0x00, 0x7a, 0xff),
             ],
             brightness: 100,
+            hue: 0,
             effect: Effect::Static,
             effect_color: Rgb::ACCENT,
             speed: 55,
@@ -245,6 +259,7 @@ impl Lighting {
     pub fn sanitize(&mut self) {
         self.brightness = self.brightness.clamp(1, 100);
         self.speed = self.speed.clamp(1, 100);
+        self.hue %= 360;
     }
 
     /// The colour a lighting action targets.
@@ -256,6 +271,10 @@ impl Lighting {
         if zone < ZONE_COUNT {
             self.zones[zone] = color;
         }
+    }
+
+    pub fn render_color(&self, color: Rgb) -> Rgb {
+        color.with_hue(self.hue).scaled(self.brightness)
     }
 
     /// Approximate the native animation without sending animation frames to HID.
@@ -279,13 +298,15 @@ impl Lighting {
         };
         match self.effect {
             Effect::Static => match self.layout {
-                Layout::Uniform => [self.color.scaled(self.brightness); ZONE_COUNT],
-                Layout::Zones => self.zones.map(|c| c.scaled(self.brightness)),
+                Layout::Uniform => [self.render_color(self.color); ZONE_COUNT],
+                Layout::Zones => self.zones.map(|c| self.render_color(c)),
             },
             Effect::Breathing => {
                 let pulse = (0.5 + 0.5 * (phase * std::f32::consts::TAU).cos())
                     * f32::from(self.brightness);
-                [self.effect_color.scaled(pulse.round() as u8); ZONE_COUNT]
+                [self.effect_color
+                    .with_hue(self.hue)
+                    .scaled(pulse.round() as u8); ZONE_COUNT]
             }
             Effect::Cycle => [rainbow(phase); ZONE_COUNT],
             Effect::Wave => std::array::from_fn(|zone| {
@@ -309,6 +330,38 @@ pub struct Profile {
     pub lighting: Lighting,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SolidLight {
+    pub enabled: bool,
+    pub color: Rgb,
+    pub brightness: u8,
+    pub hue: u16,
+}
+
+impl Default for SolidLight {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            color: Rgb::ACCENT,
+            brightness: 100,
+            hue: 0,
+        }
+    }
+}
+
+impl SolidLight {
+    pub fn as_lighting(self) -> Lighting {
+        Lighting {
+            enabled: self.enabled,
+            color: self.color,
+            brightness: self.brightness,
+            hue: self.hue,
+            ..Lighting::default()
+        }
+    }
+}
+
 /// Keep the original flat JSON compatible with versions before profiles.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -317,11 +370,35 @@ pub struct Config {
     pub lighting: Lighting,
     pub theme: ThemeMode,
     pub profiles: Vec<Profile>,
+    pub mouse: SolidLight,
+    pub shared: SolidLight,
+    pub sync_colors: bool,
 }
 
 impl Config {
+    pub fn keyboard_lighting(&self) -> Lighting {
+        if self.sync_colors {
+            self.shared.as_lighting()
+        } else {
+            self.lighting.clone()
+        }
+    }
+
+    pub fn mouse_lighting(&self) -> Lighting {
+        if self.sync_colors {
+            self.shared
+        } else {
+            self.mouse
+        }
+        .as_lighting()
+    }
+
     pub fn sanitize(&mut self) {
         self.lighting.sanitize();
+        for light in [&mut self.mouse, &mut self.shared] {
+            light.brightness = light.brightness.clamp(1, 100);
+            light.hue %= 360;
+        }
         for profile in &mut self.profiles {
             profile.lighting.sanitize();
         }
@@ -460,6 +537,28 @@ pub fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_light_survives_reload_and_keeps_individual_settings() {
+        let mut config = Config::default();
+        config.lighting.layout = Layout::Zones;
+        config.mouse.color = Rgb::WHITE;
+        config.shared.color = Rgb::new(255, 0, 0);
+        config.shared.hue = 120;
+        config.shared.brightness = 50;
+        config.sync_colors = true;
+        let mut saved: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        let green = Rgb::new(0, 128, 0);
+        assert_eq!(
+            saved.keyboard_lighting().preview_colors(0.0),
+            [green; ZONE_COUNT]
+        );
+        assert_eq!(saved.mouse_lighting().preview_colors(0.0)[0], green);
+        saved.sync_colors = false;
+        assert_eq!(saved.keyboard_lighting().layout, Layout::Zones);
+        assert_eq!(saved.mouse_lighting().color, Rgb::WHITE);
+    }
 
     #[test]
     fn hex_round_trip() {

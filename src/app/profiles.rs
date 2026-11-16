@@ -14,6 +14,9 @@ impl G213App {
                     .size(13.0)
                     .color(pal.text_muted),
             );
+            if self.config.sync_colors {
+                ui.label("Os perfis do teclado entram em vigor ao desativar a sincronização.");
+            }
             ui.add_space(16.0);
             widgets::panel_card(
                 ui,

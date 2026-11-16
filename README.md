@@ -1,6 +1,6 @@
 # G213 RGB
 
-Controle de iluminação do **Logitech G213 Prodigy** no Linux, feito em Rust.
+Controle de iluminação do **Logitech G213 Prodigy e G203** no Linux, feito em Rust.
 Uma aplicação local, em português, com design inspirado no
 [OpenLogi](https://github.com/AprilNEA/OpenLogi): galeria de dispositivos,
 imagem do produto, navegação por abas e ajustes junto à prévia do teclado.
@@ -36,11 +36,20 @@ Os sliders também aceitam as setas do teclado quando recebem foco.
 
 ## Escopo e referência
 
-Esta versão é exclusiva para o **G213 USB (`046d:c336`)**. O teclado tem cinco
-áreas de iluminação, não RGB individual por tecla. Remapeamento de teclas,
-macros, perfis automáticos por aplicativo e outros dispositivos não estão
-implementados. As funcionalidades do OpenLogi dependem do hardware; aqui os
-controles respeitam as capacidades documentadas do G213.
+| Dispositivo USB | Identificador | Controles |
+| --- | --- | --- |
+| G213 Prodigy | `046d:c336` | Cinco zonas, cor uniforme e efeitos nativos |
+| G203 Prodigy | `046d:c084` | Cor estática do logo, brilho e matiz |
+| G203 LIGHTSYNC | `046d:c092`, `046d:c09d` | Cor estática uniforme nas três zonas, brilho e matiz |
+
+O aplicativo controla um teclado e um mouse por vez. **Buscar dispositivos**
+atualiza a galeria e tenta acessar os modelos compatíveis conectados por USB.
+O reconhecimento também ocorre automaticamente ao conectar o cabo.
+
+Com **Sincronizar cores**, os dois dispositivos recebem a mesma cor estática,
+brilho e matiz. As configurações individuais voltam ao desativar a sincronização.
+O brilho escala a cor até o máximo disponível no hardware. A matiz gira o tom
+da cor base e está disponível no G213 em estático e respiração.
 
 A identidade do aplicativo é própria. Não há afiliação com OpenLogi ou Logitech.
 Nenhum recurso exige conta, telemetria ou download de imagem em tempo de execução.
@@ -110,6 +119,15 @@ cargo build --locked --release
 ./target/release/g213-rgb
 ```
 
+## Restaurar após reiniciar
+
+Abra **Ajustes → Iniciar com o sistema** pelo ícone de engrenagem. O aplicativo
+usa a inicialização automática XDG para abrir quando você entrar na sessão
+gráfica e reaplicar a configuração salva, inclusive quando detectar um dispositivo
+conectado depois do login. Use um caminho estável para o executável, como o criado
+por `./install.sh`. Após uma atualização da regra de acesso, reconecte os
+dispositivos.
+
 ## Configuração e perfis
 
 As alterações são salvas automaticamente em
@@ -131,7 +149,7 @@ exibe o detalhe. Mudanças de tema ou criação de perfis não reenviam comandos
 | `g213-rgb --diagnose` | Localiza a interface HID e testa o acesso. |
 | `g213-rgb --profiles` | Lista perfis locais e predefinidos. |
 | `g213-rgb --profile "Aurora"` | Aplica um perfil e salva a seleção após sucesso. |
-| `g213-rgb --apply` | Reaplica a configuração salva. |
+| `g213-rgb --apply` | Reaplica a configuração salva aos dispositivos disponíveis. |
 | `g213-rgb --test` | Envia cinco cores distintas para testar as zonas. |
 | `g213-rgb --off` | Apaga a iluminação sem alterar a configuração salva. |
 | `g213-rgb --help` | Mostra a ajuda. |
@@ -154,7 +172,7 @@ Os testes cobrem pacotes HID, desconexão em repouso, leitura de configurações
 antigas, perfis, validação hexadecimal (incluindo Unicode), simulação dos efeitos
 e fluxos de interação da interface sem hardware. A prévia permite conferir
 as telas sem enviar comandos ao teclado. A validação dos efeitos físicos
-continua dependendo de um G213 conectado e com acesso liberado.
+continua dependendo dos dispositivos conectados e com acesso liberado.
 
 | Arquivo | Responsabilidade |
 | --- | --- |

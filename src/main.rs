@@ -4,6 +4,7 @@
 //! diagnostic subcommands (`--diagnose`, `--test`, `--off`).
 
 mod app;
+mod autostart;
 mod config;
 mod device;
 mod keyboard;
@@ -89,14 +90,45 @@ fn run_saved(profile_name: Option<&str>) -> i32 {
         };
         config.lighting = profile.lighting.clone();
     }
-    let Some(found) = device::discover() else {
-        eprintln!("Nenhum Logitech G213 encontrado. A configuração foi preservada.");
+    if profile_name.is_some() && config.sync_colors {
+        eprintln!("Desative a sincronização na interface para aplicar um perfil ao teclado.");
+        return 2;
+    }
+    let mut found_any = false;
+    let mut failed = false;
+    for mouse in [false, true] {
+        if mouse && profile_name.is_some() {
+            continue;
+        }
+        let Some(found) = device::discover_matching(mouse) else {
+            continue;
+        };
+        found_any = true;
+        let lighting = if mouse {
+            config.mouse_lighting()
+        } else {
+            config.keyboard_lighting()
+        };
+        match found.open().and_then(|device| {
+            found
+                .model
+                .apply(&device, &device::ApplyState::from(&lighting))
+        }) {
+            Ok(()) => println!("Iluminação aplicada a {}.", found.model.name()),
+            Err(err) => {
+                eprintln!(
+                    "Não foi possível aplicar a iluminação a {}: {err}",
+                    found.model.name()
+                );
+                failed = true;
+            }
+        }
+    }
+    if !found_any {
+        eprintln!("Nenhum dispositivo compatível encontrado. A configuração foi preservada.");
         return 1;
-    };
-    let result = device::G213::open(&found.path)
-        .and_then(|device| device.apply(&device::ApplyState::from(&config)));
-    if let Err(err) = result {
-        eprintln!("Não foi possível aplicar a iluminação: {err}");
+    }
+    if failed {
         return 1;
     }
     if profile_name.is_some()
@@ -105,7 +137,6 @@ fn run_saved(profile_name: Option<&str>) -> i32 {
         eprintln!("Iluminação aplicada, mas não foi possível salvar: {err}");
         return 1;
     }
-    println!("Iluminação aplicada ao G213.");
     0
 }
 

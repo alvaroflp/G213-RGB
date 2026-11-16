@@ -3,3 +3,6 @@
 # apenas para a sessão do usuário logado (uaccess), sem abrir o dispositivo
 # para todos os usuários do sistema.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c336", TAG+="uaccess", MODE="0660"
+
+# G203 Prodigy and G203 LIGHTSYNC USB variants.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c084|c092|c09d", TAG+="uaccess", MODE="0660"

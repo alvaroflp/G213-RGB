@@ -137,7 +137,7 @@ install_udev() {
         return 0
     fi
 
-    echo "Instalando regra de acesso ao teclado (sudo)..."
+    echo "Instalando regra de acesso aos dispositivos (sudo)..."
     run_system install -m 0644 "$RULE_SRC" "$RULE_DEST"
 
     if command -v udevadm >/dev/null 2>&1; then
@@ -198,7 +198,7 @@ install_app() {
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-Comment=Controle de iluminação do Logitech G213 Prodigy
+Comment=Controle de iluminação do Logitech G213 e G203
 Exec="$BIN_DIR/$APP_ID"
 Icon=$APP_ID
 Terminal=false
@@ -257,6 +257,8 @@ uninstall_app() {
         echo "Regra udev mantida (--no-udev)."
     fi
     update_caches
+
+    rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/$APP_ID.desktop"
 
     if [ "$PURGE" -eq 1 ]; then
         CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_ID"

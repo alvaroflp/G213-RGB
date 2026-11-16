@@ -16,6 +16,7 @@ use egui::{
 };
 use std::time::{Duration, Instant};
 
+mod peripherals;
 mod profiles;
 
 const DEVICE_NAME: &str = "Logitech G213 Prodigy";
@@ -87,6 +88,12 @@ enum SwatchPick {
 pub struct G213App {
     config: Config,
     worker: Option<DeviceWorker>,
+    mouse_worker: Option<DeviceWorker>,
+    mouse_image: crate::product::ProductImage,
+    peripheral_dialog: Option<bool>,
+    autostart: bool,
+    autostart_error: Option<String>,
+    applied: (ApplyState, ApplyState),
     preview: bool,
     status: DeviceStatus,
     last_status_check: Instant,
@@ -128,8 +135,16 @@ impl G213App {
         theme::set_preference(ctx, config.theme);
 
         let worker = (!preview).then(DeviceWorker::start);
+        let mouse_worker = (!preview).then(|| DeviceWorker::for_mouse(true));
+        let applied = (
+            ApplyState::from(&config),
+            ApplyState::from(&config.mouse_lighting()),
+        );
         if let Some(worker) = &worker {
-            worker.apply(ApplyState::from(&config));
+            worker.apply(applied.0.clone());
+        }
+        if let Some(worker) = &mouse_worker {
+            worker.apply(applied.1.clone());
         }
         let preferred = Some(config.theme);
 
@@ -145,6 +160,12 @@ impl G213App {
             deleted_profile: None,
             config,
             worker,
+            mouse_worker,
+            applied,
+            mouse_image: crate::product::ProductImage::load_mouse(ctx),
+            peripheral_dialog: None,
+            autostart: !preview && crate::autostart::enabled(),
+            autostart_error: None,
             status: if preview {
                 DeviceStatus {
                     state: ConnectionState::NotFound,
@@ -180,9 +201,20 @@ impl G213App {
                 &mut self.last_lighting,
                 self.config.lighting.clone(),
             ));
+        }
+        let keyboard = ApplyState::from(&self.config);
+        let mouse = ApplyState::from(&self.config.mouse_lighting());
+        if keyboard != self.applied.0 {
             if let Some(worker) = &self.worker {
-                worker.apply(ApplyState::from(&self.config));
+                worker.apply(keyboard.clone());
             }
+            self.applied.0 = keyboard;
+        }
+        if mouse != self.applied.1 {
+            if let Some(worker) = &self.mouse_worker {
+                worker.apply(mouse.clone());
+            }
+            self.applied.1 = mouse;
         }
     }
 
@@ -236,13 +268,10 @@ impl G213App {
     }
 
     fn keyboard_state(&self, selected: Option<usize>, seconds: f64) -> KeyboardState {
+        let lighting = self.config.keyboard_lighting();
         KeyboardState {
-            zone_colors: self
-                .config
-                .lighting
-                .preview_colors(seconds)
-                .map(theme::color32),
-            enabled: self.config.lighting.enabled && self.config.lighting.effect != Effect::Off,
+            zone_colors: lighting.preview_colors(seconds).map(theme::color32),
+            enabled: lighting.enabled && lighting.effect != Effect::Off,
             selected_zone: selected,
         }
     }
@@ -358,11 +387,14 @@ impl G213App {
         if let Some(worker) = &self.worker {
             worker.refresh();
             self.status = DeviceStatus::searching();
+            if let Some(mouse) = &self.mouse_worker {
+                mouse.refresh();
+            }
         } else {
             self.notify("Prévia: nenhum dispositivo será acessado");
             return;
         }
-        self.notify("Procurando o G213…");
+        self.notify("Buscando dispositivos compatíveis…");
     }
 
     fn home_ui(&mut self, ui: &mut Ui, pal: Palette) {
@@ -376,15 +408,16 @@ impl G213App {
                             .font(theme::font(28.0, Weight::SemiBold)),
                     );
                     ui.label(
-                        RichText::new("Seu teclado. Suas cores. Tudo neste computador.")
+                        RichText::new("Personalize a iluminação do teclado e do mouse.")
                             .size(14.0)
                             .color(pal.text_muted),
                     );
                     ui.add_space(12.0);
                     self.connection_callout(ui, &pal);
                     ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(((ui.available_width() - 430.0) * 0.5).max(0.0));
+                    self.peripheral_actions(ui, pal);
+                    ui.add_space(8.0);
+                    ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
                             ui.set_width(430.0);
                             let card = widgets::panel_card(ui, &pal, None, |ui| {
@@ -415,8 +448,9 @@ impl G213App {
                                 widgets::divider(ui, &pal);
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
-                                    let summary = if self.config.lighting.enabled {
-                                        self.config.lighting.effect.label()
+                                    let lighting = self.config.keyboard_lighting();
+                                    let summary = if lighting.enabled {
+                                        lighting.effect.label()
                                     } else {
                                         "Desligado"
                                     };
@@ -452,19 +486,10 @@ impl G213App {
                                 self.view = View::Detail;
                             }
                         });
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new("Compatível com Logitech G213 Prodigy")
-                                .size(12.0)
-                                .color(pal.text_muted),
-                        );
-                        ui.label(
-                            RichText::new("Configuração local · Sem conta · Sem telemetria")
-                                .size(11.0)
-                                .color(pal.text_muted),
-                        );
+                        ui.vertical(|ui| {
+                            ui.set_width(360.0);
+                            self.mouse_card(ui, pal);
+                        });
                     });
                 });
                 ui.add_space(16.0);
@@ -550,6 +575,12 @@ impl G213App {
                         self.profiles_tab(ui, pal);
                         return;
                     }
+                    if self.config.sync_colors {
+                        self.sync_notice(ui, pal);
+                        ui.add_space(16.0);
+                        self.product_panel(ui, pal);
+                        return;
+                    }
                     let width = ui.available_width();
                     if width >= 820.0 {
                         let right = if width >= 1000.0 { 416.0 } else { 360.0 };
@@ -611,8 +642,9 @@ impl G213App {
                 });
             });
             ui.add_space(12.0);
-            let interactive =
-                self.tab == Tab::Lighting && self.config.lighting.layout == Layout::Zones;
+            let interactive = self.tab == Tab::Lighting
+                && !self.config.sync_colors
+                && self.config.lighting.layout == Layout::Zones;
             let state = self.keyboard_state(
                 if interactive {
                     Some(self.selected_zone)
@@ -789,16 +821,24 @@ impl G213App {
                     .size(12.0)
                     .color(pal.text_muted),
             );
-        } else if self.config.lighting.effect != Effect::Off
-            && widgets::slider_row(
+        } else if self.config.lighting.effect != Effect::Off {
+            let brightness = widgets::slider_row(
                 ui,
                 &pal,
                 "Brilho",
                 &mut self.config.lighting.brightness,
                 1..=100,
-            )
-        {
-            self.touch();
+            );
+            let hue = ui
+                .add(
+                    egui::Slider::new(&mut self.config.lighting.hue, 0..=359)
+                        .suffix("°")
+                        .text("Matiz"),
+                )
+                .changed();
+            if brightness || hue {
+                self.touch();
+            }
         }
     }
 
@@ -1183,6 +1223,9 @@ impl G213App {
                 ui.add_space(16.0);
                 widgets::divider(ui, &pal);
                 ui.add_space(14.0);
+                self.autostart_ui(ui, pal);
+                ui.add_space(8.0);
+                widgets::divider(ui, &pal);
                 widgets::kv_row(ui, &pal, "Aplicativo", "G213 RGB");
                 widgets::hairline(ui, &pal, 0.0);
                 widgets::kv_row(ui, &pal, "Versão", env!("CARGO_PKG_VERSION"));
@@ -1193,7 +1236,7 @@ impl G213App {
                     RichText::new(if self.preview {
                         "Neste modo, as alterações são temporárias e não acessam o teclado."
                     } else {
-                        "As alterações são salvas neste computador e enviadas ao G213 conectado."
+                        "As alterações são salvas neste computador e enviadas aos dispositivos conectados."
                     })
                     .font(theme::font(11.5, Weight::Regular))
                     .color(pal.text_muted),
@@ -1362,7 +1405,11 @@ impl G213App {
             self.preferred = Some(self.config.theme);
         }
         self.save_if_due();
-        if !self.settings_open && self.color_editor.is_none() && !ctx.text_edit_focused() {
+        if !self.settings_open
+            && self.peripheral_dialog.is_none()
+            && self.color_editor.is_none()
+            && !ctx.text_edit_focused()
+        {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.view = View::Home;
             }
@@ -1432,6 +1479,7 @@ impl G213App {
             }
         });
         self.settings_modal(&ctx, pal);
+        self.peripherals_modal(&ctx, pal);
         self.color_modal(&ctx, pal);
         self.toast_ui(&ctx, pal);
 
