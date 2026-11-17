@@ -76,7 +76,10 @@ Os controles individuais ficam nas telas do teclado e do mouse.
 Em **Sincronizar cores**, escolha **Cor compartilhada** para usar a mesma
 cor estática, brilho e matiz nos dois dispositivos. O painel mostra a prévia
 e o estado de conexão do G213 e do G203. Clique em **Aplicar** para salvar
-e enviar as mudanças. Para recuperar as cores e os efeitos anteriores,
+e enviar as mudanças. Os cartões na galeria indicam se o envio está pendente,
+se foi confirmado por USB ou se falhou. Use **Reenviar** no cartão que falhou.
+A confirmação USB indica que o dispositivo aceitou o comando. Para recuperar
+as cores e os efeitos anteriores,
 selecione **Cores individuais** e aplique.
 O brilho escala a cor até o máximo disponível no hardware. A matiz gira o tom
 da cor base e está disponível no G213 em estático e respiração.
@@ -164,7 +167,9 @@ O ícone do **G213 RGB** aparece no painel de ambientes com suporte a
 StatusNotifierItem/AppIndicator, como o Zorin com Zorin AppIndicator habilitado
 e o KDE Plasma. Por padrão, o **X** esconde a janela e a iluminação e as macros
 continuam em execução. No menu do ícone, use **Abrir G213 RGB** para voltar e
-**Sair** para encerrar. Em **Ajustes**, você também pode desativar o comportamento
+**Sair** para encerrar. Abrir o atalho do aplicativo enquanto ele está na
+bandeja restaura a janela da instância existente. Em **Ajustes**, você também
+pode desativar o comportamento
 de manter o aplicativo na bandeja ao fechar. Se o painel não oferecer bandeja,
 o **X** encerra o aplicativo normalmente.
 
@@ -187,7 +192,7 @@ exibe o detalhe. Mudanças de tema ou criação de perfis não reenviam comandos
 | `g213-rgb` | Abre a interface. |
 | `g213-rgb --background` | Inicia na bandeja quando estiver disponível e ativada nos ajustes. |
 | `g213-rgb --preview` | Explora a interface sem hardware ou salvamento. |
-| `g213-rgb --diagnose` | Localiza a interface HID e testa o acesso. |
+| `g213-rgb --diagnose` | Verifica acesso USB, permissões de macros, bandeja e início automático. |
 | `g213-rgb --profiles` | Lista perfis locais e predefinidos. |
 | `g213-rgb --profile "Aurora"` | Aplica um perfil e salva a seleção após sucesso. |
 | `g213-rgb --apply` | Reaplica a configuração salva aos dispositivos disponíveis. |
@@ -195,12 +200,15 @@ exibe o detalhe. Mudanças de tema ou criação de perfis não reenviam comandos
 | `g213-rgb --off` | Apaga a iluminação sem alterar a configuração salva. |
 | `g213-rgb --help` | Mostra a ajuda. |
 
-Use a CLI com a interface gráfica fechada para evitar que dois processos
-escrevam no dispositivo ou no mesmo arquivo de configuração. `--profile`
+Encerre o aplicativo em **Sair** na bandeja antes de usar comandos CLI que
+escrevem nos dispositivos. O diagnóstico funciona com o aplicativo aberto e
+consulta acesso sem enviar comandos de iluminação. `--profile`
 preserva a configuração se o teclado não for encontrado ou a aplicação falhar.
 `G213_HIDRAW=/dev/hidrawN` permite indicar manualmente a interface de controle.
 
 ## Desenvolvimento e validação
+
+Veja o [plano de melhorias e o roteiro de validação](docs/ROADMAP.md).
 
 Para contribuir com outro dispositivo, siga o [guia de integração em AGENTS.md](AGENTS.md).
 

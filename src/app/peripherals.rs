@@ -5,6 +5,54 @@ use super::*;
 use crate::config::SolidLight;
 
 impl G213App {
+    pub(super) fn lighting_delivery(&self, ui: &mut Ui, pal: Palette, mouse: bool) {
+        use crate::device::DeliveryState;
+        let worker = if mouse {
+            &self.mouse_worker
+        } else {
+            &self.worker
+        };
+        let Some(worker) = worker else {
+            return;
+        };
+        let state = worker.delivery();
+        let (label, color) = match &state {
+            DeliveryState::Idle => return,
+            DeliveryState::Pending if worker.status().is_connected() => {
+                ("Envio pendente", pal.text_muted)
+            }
+            DeliveryState::Pending => ("Aguardando conexão para aplicar", pal.text_muted),
+            DeliveryState::Sending => ("Enviando iluminação…", pal.text_muted),
+            DeliveryState::Confirmed => ("Iluminação confirmada por USB", pal.text_muted),
+            DeliveryState::Failed(_) => ("Falha ao aplicar iluminação", theme::STATUS_DANGER),
+        };
+        ui.push_id(("lighting-delivery", mouse), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label(RichText::new(label).size(12.0).color(color));
+                if let DeliveryState::Failed(error) = state {
+                    label.on_hover_text(error);
+                    if widgets::button(
+                        ui,
+                        &pal,
+                        "Reenviar",
+                        Some(egui_phosphor::regular::ARROW_CLOCKWISE),
+                        ButtonKind::Secondary,
+                    )
+                    .clicked()
+                    {
+                        let desired = if mouse {
+                            self.config.mouse_lighting()
+                        } else {
+                            self.config.keyboard_lighting()
+                        };
+                        worker.retry(ApplyState::from(&desired));
+                        ui.ctx().request_repaint();
+                    }
+                }
+            });
+        });
+    }
+
     pub(super) fn peripheral_actions(&mut self, ui: &mut Ui, pal: Palette) {
         ui.horizontal(|ui| {
             if widgets::button(
@@ -105,6 +153,7 @@ impl G213App {
             {
                 ui.label(error);
             }
+            self.lighting_delivery(ui, pal, true);
             widgets::divider(ui, &pal);
             ui.horizontal_wrapped(|ui| {
                 if widgets::button(ui, &pal, "Personalizar mouse", None, ButtonKind::Primary)
@@ -127,7 +176,13 @@ impl G213App {
 
     pub(super) fn sync_notice(&mut self, ui: &mut Ui, pal: Palette) {
         widgets::panel_card(ui, &pal, None, |ui| {
-            ui.label("O teclado e o mouse estão usando a cor compartilhada.");
+            ui.label("O teclado e o mouse estão configurados para usar a cor compartilhada.");
+            if !self.preview {
+                widgets::section_label(ui, &pal, "G213 · teclado");
+                self.lighting_delivery(ui, pal, false);
+                widgets::section_label(ui, &pal, "G203 · mouse");
+                self.lighting_delivery(ui, pal, true);
+            }
             if widgets::button(
                 ui,
                 &pal,

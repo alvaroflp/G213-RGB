@@ -1,0 +1,35 @@
+name: Verificar G213 RGB
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Instalar ferramentas
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev udev
+      - name: Verificar código Rust
+        run: |
+          cargo +stable fmt --check
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked
+      - name: Validar scripts e regras de acesso
+        run: |
+          sh -n install.sh
+          sh -n run.sh
+          ./install.sh --help
+          udevadm verify udev/60-g213-rgb.rules udev/60-g213-rgb-macros.rules

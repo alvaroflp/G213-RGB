@@ -244,7 +244,8 @@ pub enum Status {
 }
 
 pub struct Worker {
-    tx: mpsc::Sender<Settings>,
+    tx: Option<mpsc::Sender<Settings>>,
+    thread: Option<thread::JoinHandle<()>>,
     status: Arc<Mutex<Status>>,
 }
 
@@ -253,21 +254,40 @@ impl Worker {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(Status::Paused));
         let reporting = status.clone();
-        if let Err(error) = thread::Builder::new()
+        let thread = match thread::Builder::new()
             .name("g213-macros".into())
             .spawn(move || run(rx, reporting))
         {
-            *status.lock().unwrap() = Status::Error(error.to_string());
+            Ok(thread) => Some(thread),
+            Err(error) => {
+                *status.lock().unwrap() = Status::Error(error.to_string());
+                None
+            }
+        };
+        Self {
+            tx: Some(tx),
+            thread,
+            status,
         }
-        Self { tx, status }
     }
 
     pub fn update(&self, settings: &Settings) {
-        let _ = self.tx.send(settings.clone());
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(settings.clone());
+        }
     }
 
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().clone()
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -316,6 +336,50 @@ fn sysfs_peripheral(event: &Path) -> Option<Peripheral> {
     let read =
         |field| u16::from_str_radix(fs::read_to_string(id.join(field)).ok()?.trim(), 16).ok();
     Peripheral::from_ids(read("bustype")?, read("vendor")?, read("product")?)
+}
+
+pub fn diagnose_access() {
+    println!("\nMacros");
+    let mut needs_setup = false;
+    match fs::OpenOptions::new().write(true).open("/dev/uinput") {
+        Ok(_) => println!("  /dev/uinput: acesso OK"),
+        Err(error) => {
+            needs_setup = matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            );
+            println!("  /dev/uinput: {error}");
+        }
+    }
+    let Ok(entries) = fs::read_dir("/sys/class/input") else {
+        println!("  Não foi possível consultar as interfaces de entrada.");
+        return;
+    };
+    let mut found = false;
+    for entry in entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("event"))
+    {
+        if let Some(peripheral) = sysfs_peripheral(&entry.path()) {
+            found = true;
+            let node = Path::new("/dev/input").join(entry.file_name());
+            match fs::File::open(&node) {
+                Ok(_) => println!("  {} · {}: acesso OK", peripheral.label(), node.display()),
+                Err(error) => {
+                    needs_setup |= error.kind() == io::ErrorKind::PermissionDenied;
+                    println!("  {} · {}: {error}", peripheral.label(), node.display());
+                }
+            }
+        }
+    }
+    if !found {
+        println!("  Nenhuma interface de entrada compatível encontrada.");
+    }
+    if needs_setup {
+        println!(
+            "  Para habilitar macros, execute ./install.sh --with-macros e reconecte os dispositivos."
+        );
+    }
 }
 
 fn discover(bindings: &Bindings, sources: &mut HashMap<PathBuf, Source>) -> Option<String> {

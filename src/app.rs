@@ -119,16 +119,27 @@ pub struct G213App {
     profile_name: String,
     profile_error: Option<String>,
     deleted_profile: Option<config::Profile>,
+    // Release the single-instance socket after stopping device workers.
+    activation: Option<crate::instance::Activation>,
 }
 
 impl G213App {
-    pub fn new(cc: &eframe::CreationContext<'_>, preview: bool, background: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        preview: bool,
+        background: bool,
+        instance: Option<crate::instance::Instance>,
+    ) -> std::io::Result<Self> {
+        let activation = instance
+            .map(|instance| instance.listen(cc.egui_ctx.clone()))
+            .transpose()?;
         let mut app = Self::with_context(&cc.egui_ctx, preview);
+        app.activation = activation;
         if !preview {
             app.tray =
                 crate::tray::Tray::start(&cc.egui_ctx, background && app.config.keep_in_tray);
         }
-        app
+        Ok(app)
     }
 
     fn with_context(ctx: &egui::Context, preview: bool) -> Self {
@@ -175,6 +186,7 @@ impl G213App {
             deleted_profile: None,
             config,
             tray: None,
+            activation: None,
             macro_worker,
             macro_editor: macro_editor::Editor::default(),
             worker,
@@ -507,6 +519,7 @@ impl G213App {
                                         .size(13.0)
                                         .color(pal.text_muted),
                                 );
+                                self.lighting_delivery(ui, pal, false);
                                 ui.add_space(14.0);
                                 widgets::divider(ui, &pal);
                                 ui.add_space(8.0);
@@ -1568,8 +1581,14 @@ impl G213App {
 
 impl eframe::App for G213App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let reopen = self
+            .activation
+            .as_ref()
+            .is_some_and(crate::instance::Activation::take_request);
         if let Some(tray) = &mut self.tray {
-            tray.update(ctx, self.config.keep_in_tray);
+            tray.update(ctx, self.config.keep_in_tray, reopen);
+        } else if reopen {
+            crate::tray::show_window(ctx, true);
         }
         self.save_if_due();
         if self.dirty && !self.preview {

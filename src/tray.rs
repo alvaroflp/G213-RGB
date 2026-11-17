@@ -131,8 +131,8 @@ impl Tray {
         self.online.load(Ordering::Relaxed) && !self.handle.is_closed()
     }
 
-    pub fn update(&mut self, ctx: &Context, keep_in_tray: bool) {
-        let mut open = false;
+    pub fn update(&mut self, ctx: &Context, keep_in_tray: bool, reopen: bool) {
+        let mut open = reopen;
         for action in self.actions.try_iter() {
             match action {
                 Action::Open => open = true,
@@ -155,11 +155,7 @@ impl Tray {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
             self.hidden = false;
-            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-            if open {
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-            }
+            show_window(ctx, open);
         } else if available && ((close_requested && keep_in_tray) || start_hidden) {
             if close_requested {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -169,6 +165,25 @@ impl Tray {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
         }
+    }
+}
+
+pub fn host_available() -> zbus::Result<bool> {
+    let connection = zbus::blocking::Connection::session()?;
+    let watcher = zbus::blocking::Proxy::new(
+        &connection,
+        "org.kde.StatusNotifierWatcher",
+        "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher",
+    )?;
+    watcher.get_property("IsStatusNotifierHostRegistered")
+}
+
+pub fn show_window(ctx: &Context, focus: bool) {
+    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+    if focus {
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 }
 

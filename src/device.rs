@@ -581,17 +581,56 @@ pub fn build_mode_packet(mode: u8, color: Rgb, speed: u8, direction: u8) -> [u8;
 // Background worker
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeliveryState {
+    #[default]
+    Idle,
+    Pending,
+    Sending,
+    Confirmed,
+    Failed(String),
+}
+
+#[derive(Default)]
+struct Delivery {
+    revision: u64,
+    state: DeliveryState,
+}
+
+impl Delivery {
+    fn queue(&mut self) -> u64 {
+        self.revision += 1;
+        self.state = DeliveryState::Pending;
+        self.revision
+    }
+
+    fn report(&mut self, revision: u64, state: DeliveryState) {
+        // Acknowledgements for a superseded color must not replace the status
+        // displayed for the newest edit.
+        if self.revision == revision {
+            self.state = state;
+        }
+    }
+}
+
+struct LightingRequest {
+    state: ApplyState,
+    revision: u64,
+    retry_now: bool,
+}
+
 enum Command {
-    Apply(Box<ApplyState>),
+    Apply(Box<LightingRequest>),
     Refresh,
 }
 
 /// Owns the device on a background thread so a slow acknowledgement can never
-/// stall a frame. New states replace older queued ones (latest wins), and the
-/// last state is re-applied automatically when the keyboard comes back.
+/// stall a frame. The latest requested state is reapplied on reconnect.
 pub struct DeviceWorker {
-    tx: Sender<Command>,
+    tx: Option<Sender<Command>>,
+    thread: Option<thread::JoinHandle<()>>,
     status: Arc<Mutex<DeviceStatus>>,
+    delivery: Arc<Mutex<Delivery>>,
 }
 
 impl DeviceWorker {
@@ -602,40 +641,96 @@ impl DeviceWorker {
     pub fn for_mouse(mouse: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(DeviceStatus::searching()));
+        let delivery = Arc::new(Mutex::new(Delivery::default()));
         let worker_status = Arc::clone(&status);
-        let _ = thread::Builder::new()
-            .name("g213-device".to_string())
-            .spawn(move || worker_loop(rx, worker_status, mouse));
-        Self { tx, status }
-    }
-
-    pub fn status(&self) -> DeviceStatus {
-        match self.status.lock() {
-            Ok(status) => status.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+        let worker_delivery = Arc::clone(&delivery);
+        let thread = thread::Builder::new()
+            .name(if mouse { "g203-device" } else { "g213-device" }.into())
+            .spawn(move || worker_loop(rx, worker_status, worker_delivery, mouse))
+            .ok();
+        Self {
+            tx: Some(tx),
+            thread,
+            status,
+            delivery,
         }
     }
 
+    pub fn status(&self) -> DeviceStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn delivery(&self) -> DeliveryState {
+        self.delivery
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .state
+            .clone()
+    }
+
     pub fn apply(&self, state: ApplyState) {
-        let _ = self.tx.send(Command::Apply(Box::new(state)));
+        self.submit(state, false);
+    }
+
+    pub fn retry(&self, state: ApplyState) {
+        self.submit(state, true);
+    }
+
+    fn submit(&self, state: ApplyState, retry_now: bool) {
+        let mut delivery = self.delivery.lock().unwrap_or_else(|err| err.into_inner());
+        let revision = delivery.queue();
+        if let Some(tx) = &self.tx
+            && tx
+                .send(Command::Apply(Box::new(LightingRequest {
+                    state,
+                    revision,
+                    retry_now,
+                })))
+                .is_err()
+        {
+            delivery.report(
+                revision,
+                DeliveryState::Failed("O serviço do dispositivo não está em execução.".into()),
+            );
+        }
     }
 
     pub fn refresh(&self) {
-        let _ = self.tx.send(Command::Refresh);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Command::Refresh);
+        }
     }
 }
 
-fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>, mouse: bool) {
+impl Drop for DeviceWorker {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn worker_loop(
+    rx: Receiver<Command>,
+    status: Arc<Mutex<DeviceStatus>>,
+    delivery: Arc<Mutex<Delivery>>,
+    mouse: bool,
+) {
     let mut found: Option<FoundDevice> = None;
     let mut device: Option<G213> = None;
-    let mut wanted: Option<ApplyState> = None;
+    let mut wanted: Option<Box<LightingRequest>> = None;
     let mut need_apply = true;
     let mut next_scan = Instant::now();
-
-    while Instant::now() >= next_scan && device.is_none() {
-        try_connect(&mut found, &mut device, &status, mouse);
-        next_scan = Instant::now() + RECONNECT_INTERVAL;
-    }
+    let report = |request: &LightingRequest, state| {
+        delivery
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .report(request.revision, state);
+    };
 
     loop {
         let timeout = if device.is_some() {
@@ -643,42 +738,34 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>, mouse: b
         } else {
             next_scan.saturating_duration_since(Instant::now())
         };
-        match rx.recv_timeout(timeout.max(Duration::from_millis(50))) {
-            Ok(Command::Apply(state)) => {
-                wanted = Some(*state);
-                need_apply = true;
-            }
-            Ok(Command::Refresh) => {
-                found = None;
-                device = None;
-                next_scan = Instant::now();
-                need_apply = true;
-            }
-            Err(RecvTimeoutError::Timeout) => {}
+        let first = match rx.recv_timeout(timeout.max(Duration::from_millis(50))) {
+            Ok(command) => Some(command),
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
-        }
+        };
 
-        // Collapse a burst of slider changes into the newest state.
-        while let Ok(command) = rx.try_recv() {
+        // Collapse a burst of slider changes into the newest state, while
+        // retaining explicit requests to check the USB connection immediately.
+        let mut refresh = false;
+        for command in first.into_iter().chain(rx.try_iter()) {
             match command {
-                Command::Apply(state) => {
-                    wanted = Some(*state);
+                Command::Apply(request) => {
+                    refresh |= request.retry_now && device.is_none();
+                    wanted = Some(request);
                     need_apply = true;
                 }
-                Command::Refresh => {
-                    found = None;
-                    device = None;
-                    next_scan = Instant::now();
-                    need_apply = true;
-                }
+                Command::Refresh => refresh = true,
             }
         }
 
-        if device.as_ref().is_some_and(G213::disconnected) {
+        if refresh || device.as_ref().is_some_and(G213::disconnected) {
             device = None;
             found = None;
             need_apply = true;
             next_scan = Instant::now();
+            if let Some(request) = &wanted {
+                report(request, DeliveryState::Pending);
+            }
         }
 
         if device.is_none() && Instant::now() >= next_scan {
@@ -686,37 +773,62 @@ fn worker_loop(rx: Receiver<Command>, status: Arc<Mutex<DeviceStatus>>, mouse: b
             next_scan = Instant::now() + RECONNECT_INTERVAL;
             if device.is_some() {
                 need_apply = true;
+            } else if let Some(request) = &wanted {
+                let connection = status.lock().unwrap_or_else(|err| err.into_inner());
+                let state = if matches!(
+                    connection.state,
+                    ConnectionState::PermissionDenied | ConnectionState::Error
+                ) {
+                    DeliveryState::Failed(
+                        connection
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| "Falha ao abrir o dispositivo.".into()),
+                    )
+                } else {
+                    DeliveryState::Pending
+                };
+                report(request, state);
             }
         }
 
         if need_apply
-            && let (Some(dev), Some(state), Some(info)) =
+            && let (Some(dev), Some(request), Some(info)) =
                 (device.as_ref(), wanted.as_ref(), found.as_ref())
         {
-            match info.model.apply(dev, state) {
+            report(request, DeliveryState::Sending);
+            match info.model.apply(dev, &request.state) {
                 Ok(()) => {
                     need_apply = false;
-                    if let Some(found) = found.as_ref() {
-                        set_status(
-                            &status,
-                            DeviceStatus::connected(found.path.clone(), found.name.clone()),
-                        );
-                    }
+                    report(request, DeliveryState::Confirmed);
                 }
                 Err(err) => {
-                    let permission_denied = err.kind() == io::ErrorKind::PermissionDenied;
-                    device = None;
-                    let next = DeviceStatus {
-                        state: if permission_denied {
-                            ConnectionState::PermissionDenied
-                        } else {
-                            ConnectionState::Error
-                        },
-                        path: found.as_ref().map(|found| found.path.clone()),
-                        name: found.as_ref().map(|found| found.name.clone()),
-                        detail: Some(err.to_string()),
+                    let error = err.to_string();
+                    let state = match err.kind() {
+                        io::ErrorKind::PermissionDenied => ConnectionState::PermissionDenied,
+                        io::ErrorKind::NotConnected | io::ErrorKind::NotFound => {
+                            ConnectionState::NotFound
+                        }
+                        _ => ConnectionState::Error,
                     };
-                    set_status(&status, next);
+                    report(
+                        request,
+                        if state == ConnectionState::NotFound {
+                            DeliveryState::Pending
+                        } else {
+                            DeliveryState::Failed(error.clone())
+                        },
+                    );
+                    set_status(
+                        &status,
+                        DeviceStatus {
+                            state,
+                            path: Some(info.path.clone()),
+                            name: Some(info.name.clone()),
+                            detail: Some(error),
+                        },
+                    );
+                    device = None;
                     found = None;
                     next_scan = Instant::now() + RECONNECT_INTERVAL;
                 }
@@ -787,38 +899,34 @@ fn set_status(status: &Arc<Mutex<DeviceStatus>>, value: DeviceStatus) {
 // CLI helpers
 // ---------------------------------------------------------------------------------------------
 
-/// `--diagnose`: print what was found and whether it can be opened.
+/// `--diagnose`: check access to each USB device without writing a HID report.
 pub fn run_diagnose() -> i32 {
     println!("G213 RGB — diagnóstico");
-    println!();
-
-    let Some(found) = discover() else {
-        println!("Nenhum Logitech G213 (046d:c336) encontrado.");
-        println!("Verifique se o teclado está conectado por USB.");
-        return 1;
-    };
-
-    println!("Dispositivo : {}", found.name);
-    println!("Interface   : {}", found.path.display());
-
-    match G213::open(&found.path) {
-        Ok(_) => {
-            println!("Acesso      : OK");
-            0
-        }
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            println!("Acesso      : NEGADO ({err})");
-            println!();
-            println!("Execute o instalador para liberar o acesso sem root:");
-            println!("    ./install.sh");
-            println!("Depois desconecte e reconecte o teclado.");
-            2
-        }
-        Err(err) => {
-            println!("Acesso      : ERRO ({err})");
-            3
+    let mut available = false;
+    let mut result = 0;
+    for (mouse, label) in [(false, "G213 · teclado"), (true, "G203 · mouse")] {
+        println!("\n{label}");
+        if let Some(found) = discover_matching(mouse) {
+            available = true;
+            println!("  {} · {}", found.name, found.path.display());
+            // Model::initialize may write commands. Open only the transport here.
+            match G213::open(&found.path) {
+                Ok(_) => println!("  Acesso USB: OK"),
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    println!("  Acesso USB negado: {error}");
+                    println!("  Execute ./install.sh e reconecte o dispositivo.");
+                    result = result.max(2);
+                }
+                Err(error) => {
+                    println!("  Falha no acesso USB: {error}");
+                    result = result.max(3);
+                }
+            }
+        } else {
+            println!("  Interface de controle não encontrada.");
         }
     }
+    if available { result } else { 1 }
 }
 
 /// `--test`: paint the five areas in distinct colours.
@@ -883,6 +991,21 @@ pub fn run_off() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_acknowledgement_cannot_confirm_a_new_color() {
+        let mut delivery = Delivery::default();
+        let old = delivery.queue();
+        delivery.report(old, DeliveryState::Sending);
+        let current = delivery.queue();
+        delivery.report(old, DeliveryState::Confirmed);
+        assert_eq!(delivery.state, DeliveryState::Pending);
+        delivery.report(current, DeliveryState::Failed("HID timeout".into()));
+        assert!(matches!(delivery.state, DeliveryState::Failed(_)));
+        let retry = delivery.queue();
+        delivery.report(retry, DeliveryState::Confirmed);
+        assert_eq!(delivery.state, DeliveryState::Confirmed);
+    }
 
     #[test]
     fn supported_mouse_variants_use_their_own_lighting_protocol() {
